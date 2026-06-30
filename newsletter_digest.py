@@ -2,40 +2,39 @@
 """
 Weekly newsletter digest -> #aim-staff.
 
-Reads the past week's rows from the Airtable "Newsletter Intake" table (populated by
-newsletter_intake.py), has Claude Sonnet 4.6 group the noteworthy updates into
-Hiring / Progress / New evidence & evaluations / Funding, and posts the digest to
-#aim-staff. Run `python3 newsletter_digest.py --help`.
+Reads the past week's rows from the Airtable "Newsletter Intake" table, groups them BY
+ORGANISATION, has Claude Sonnet 4.6 write a few concise bullets of noteworthy updates per
+org (hiring, progress, new evidence/evaluations, funding, and anything else notable), and
+posts the digest to #aim-staff — each org headed by a link to its "View this email in your
+browser" page so people can read it properly. Run `python3 newsletter_digest.py --help`.
 """
 
 import argparse
+import json
 import logging
 import os
+import re
 import sys
 from datetime import datetime, timedelta, timezone
 
 import requests
-import mel_intake as mel  # shared Slack send, Airtable headers, env loading
+import mel_intake as mel  # shared Slack send, Airtable helpers, charity list, env loading
 
 log = logging.getLogger("newsletter_digest")
 
-RAW_PER_NEWSLETTER = 4000   # chars of each raw email fed to the model
-TOTAL_CAP = 32000           # total chars across newsletters (keeps under the token limit)
+RAW_PER_ORG = 6000     # chars of raw email per org fed to the model
+TOTAL_CAP = 32000      # total chars across orgs (keeps under the token limit)
 
 DIGEST_SYSTEM = (
     "You are compiling a weekly internal digest for Ambitious Impact (AIM) staff from "
-    "charity newsletters received this week. Group the noteworthy updates into these "
-    "sections, in this order, and INCLUDE ONLY sections that actually have content:\n"
-    "  *Hiring* — open roles, key hires, departures\n"
-    "  *Progress* — geographic expansion, new partnerships, new product/programme features, "
-    "major operational milestones\n"
-    "  *New evidence & evaluations* — studies, evaluations, reviews, or results published\n"
-    "  *Funding* — funding received, raised, or granted\n\n"
-    "Under each section use '• ' bullets, each a short line attributed to the org, e.g. "
-    "'• Fish Welfare Initiative: hiring a Director of Programs'. Keep it tight and scannable "
-    "for busy staff; omit fluff, events, and minor news. Use Slack mrkdwn ('*Section*' bold "
-    "headers, '• ' bullets). Do not invent anything — use only what's in the newsletters. "
-    "Output ONLY the digest body (the sections), no preamble or sign-off."
+    "charity newsletters received this week, grouped by organisation. For EACH organisation "
+    "block below, write 2-5 short bullet points covering the noteworthy updates — e.g. new "
+    "hires/roles or departures; progress (geographic expansion, new partnerships, new "
+    "product/programme features, milestones); new evidence or evaluations; funding received; "
+    "and any other genuinely notable news. Keep bullets short and scannable, keep key "
+    "numbers, omit fluff/events/minor news, and do not invent anything.\n\n"
+    "Return ONLY a JSON object mapping each organisation's exact name (the value after "
+    "'ORG:') to an array of bullet strings (plain text, no leading bullet character)."
 )
 
 
@@ -45,7 +44,8 @@ def fetch_recent(token: str, base_id: str, table: str, days: int) -> list[dict]:
     out, offset = [], None
     url = f"{mel.AIRTABLE_API}/{base_id}/{table}"
     while True:
-        params = {"pageSize": 100, "fields[]": ["Subject", "From", "Date", "Raw email"]}
+        params = {"pageSize": 100, "fields[]": ["Subject", "From", "Date", "Raw email",
+                                                 "Organization", "Email link", "Slack link"]}
         if offset:
             params["offset"] = offset
         r = requests.get(url, headers=mel.airtable_headers(token), params=params, timeout=30)
@@ -58,34 +58,69 @@ def fetch_recent(token: str, base_id: str, table: str, days: int) -> list[dict]:
         offset = body.get("offset")
         if not offset:
             break
-    out.sort(key=lambda f: f.get("Date", ""))
     return out
 
 
-def build_digest_body(items: list[dict], api_key: str, model: str) -> str:
-    """Ask Claude to turn the week's newsletters into the themed digest body."""
+def org_label(row: dict, charities_by_id: dict) -> str:
+    """Org name from the linked Charities record, falling back to the From display name."""
+    org = row.get("Organization") or []
+    if org:
+        rid = org[0] if isinstance(org[0], str) else (org[0] or {}).get("id")
+        if rid and charities_by_id.get(rid):
+            return charities_by_id[rid]
+    name = (row.get("From") or "").split("<")[0].strip()
+    if "|" in name:
+        name = name.split("|")[-1].strip()
+    return name or "Unknown"
+
+
+def group_by_org(rows: list[dict], charities_by_id: dict) -> dict:
+    """Group rows by org name, tracking the most recent date and its link per org."""
+    groups: dict[str, dict] = {}
+    for row in rows:
+        name = org_label(row, charities_by_id)
+        g = groups.setdefault(name, {"rows": [], "date": "", "link": ""})
+        g["rows"].append(row)
+        d = row.get("Date", "")
+        if d >= g["date"]:  # prefer the most recent newsletter's link
+            g["date"] = d
+            g["link"] = row.get("Email link") or row.get("Slack link") or g["link"]
+    return groups
+
+
+def org_bullets(groups: dict, api_key: str, model: str) -> dict:
+    """Ask Claude for {org_name: [bullets]} across all orgs in one call."""
     import anthropic
     client = anthropic.Anthropic(api_key=api_key, max_retries=6)
     blocks, total = [], 0
-    for it in items:
-        raw = (it.get("Raw email") or "")[:RAW_PER_NEWSLETTER]
-        block = (f"From: {it.get('From', '')}\nSubject: {it.get('Subject', '')}\n"
-                 f"Date: {it.get('Date', '')}\n{raw}")
+    for name, g in groups.items():
+        raw = "\n\n".join((r.get("Raw email") or "") for r in g["rows"])[:RAW_PER_ORG]
+        block = f"ORG: {name}\n{raw}"
         if total + len(block) > TOTAL_CAP:
             break
         blocks.append(block)
         total += len(block)
-    user_msg = "\n\n=====\n\n".join(blocks) + "\n\nProduce the digest now."
-    resp = client.messages.create(
-        model=model, max_tokens=2000, system=DIGEST_SYSTEM,
-        messages=[{"role": "user", "content": user_msg}],
-    )
-    return "".join(b.text for b in resp.content if getattr(b, "type", None) == "text").strip()
+    user_msg = "\n\n=====\n\n".join(blocks) + "\n\nReturn the JSON now."
+    resp = client.messages.create(model=model, max_tokens=2000, system=DIGEST_SYSTEM,
+                                  messages=[{"role": "user", "content": user_msg}])
+    text = "".join(b.text for b in resp.content if getattr(b, "type", None) == "text").strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```[a-zA-Z]*\n?", "", text)
+        text = re.sub(r"\n?```$", "", text).strip()
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        m = re.search(r"\{.*\}", text, re.DOTALL)
+        return json.loads(m.group(0)) if m else {}
+
+
+def _norm(s: str) -> str:
+    return re.sub(r"\s+", " ", (s or "").lower()).strip()
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Weekly newsletter digest -> #aim-staff.")
-    ap.add_argument("--dry-run", action="store_true", help="Build and print the digest, but don't post to Slack.")
+    ap = argparse.ArgumentParser(description="Weekly newsletter digest (by org) -> #aim-staff.")
+    ap.add_argument("--dry-run", action="store_true", help="Build and print the digest, but don't post.")
     ap.add_argument("--since-days", type=int, default=None, help="Lookback window in days (default MEL_DIGEST_LOOKBACK_DAYS or 7).")
     args = ap.parse_args()
 
@@ -96,6 +131,7 @@ def main() -> int:
     workspace = os.environ.get("SLACK_WORKSPACE", "ceincubationprogram")
     base_id = os.environ.get("AIRTABLE_BASE_ID", "app6tmBJhcfCS7FLs")
     table_id = os.environ.get("AIRTABLE_NEWSLETTERS_TABLE_ID", "tblr8m5vdnya1PmzD")
+    charities_table = os.environ.get("AIRTABLE_CHARITIES_TABLE_ID", "tblSsWP0lp1fH9kk6")
     channel = os.environ.get("MEL_DIGEST_CHANNEL", "CMS6V5XEJ")  # #aim-staff
     model = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-6")
     days = args.since_days if args.since_days is not None else int(os.environ.get("MEL_DIGEST_LOOKBACK_DAYS", "7"))
@@ -110,21 +146,36 @@ def main() -> int:
         log.error("ALERT: Slack auth failed (%s). Check/refresh SLACK_USER_TOKEN.", e)
         return 1
 
-    items = fetch_recent(airtable_token, base_id, table_id, days)
-    log.info("%d newsletter(s) in the last %d days.", len(items), days)
-    if not items:
+    rows = fetch_recent(airtable_token, base_id, table_id, days)
+    log.info("%d newsletter(s) in the last %d days.", len(rows), days)
+    if not rows:
         log.info("No newsletters this week; nothing to post.")
         return 0
 
-    body = build_digest_body(items, anthropic_key, model)
-    if not body:
-        log.warning("Empty digest body; not posting.")
+    charities = mel.fetch_charities(airtable_token, base_id, charities_table)
+    charities_by_id = {c["id"]: c["name"] for c in charities}
+    groups = group_by_org(rows, charities_by_id)
+    bullets = org_bullets(groups, anthropic_key, model)
+    bull_by_norm = {_norm(k): v for k, v in bullets.items()}
+
+    sections = []
+    for name, g in sorted(groups.items(), key=lambda kv: kv[1]["date"], reverse=True):
+        bl = bull_by_norm.get(_norm(name)) or []
+        if not bl:
+            continue
+        head = f"*<{g['link']}|{name}>*" if g["link"] else f"*{name}*"
+        if len(g["rows"]) > 1:
+            head += f"  _({len(g['rows'])} emails)_"
+        sections.append(head + "\n" + "\n".join(f"• {b}" for b in bl))
+
+    if not sections:
+        log.warning("Nothing notable to post.")
         return 0
 
     start = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%-d %b")
     end = datetime.now(timezone.utc).strftime("%-d %b")
-    header = f"*Newsletter digest — {start}–{end}*  ({len(items)} newsletter{'s' if len(items) != 1 else ''})\n\n"
-    message = header + body
+    header = f"*Newsletter digest — {start}–{end}*\n\n"
+    message = header + "\n\n".join(sections)
 
     if args.dry_run:
         log.info("[dry-run] would post to %s:\n\n%s", channel, message)

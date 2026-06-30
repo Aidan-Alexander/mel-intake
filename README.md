@@ -213,18 +213,20 @@ thread→MEL-Notes bot above.
 - **Source:** Slackbot email posts in #mel-intake (a message whose `files[]` has a
   `filetype:"email"` entry carrying `subject`, `from`, and the full `plain_text` body
   inline). Google "forwarding confirmation" emails are skipped.
-- **Per newsletter (one row):** `Subject`, `Date`, `From`, a high-level **`What's covered`**
-  bullet summary (Claude Sonnet 4.6), the full **`Raw email`** copy, a `Slack link` to the
-  source message, and `Organization` linked to the matching Charities record when confident.
+- **Per newsletter (one row):** `Subject`, `Date`, `From`, a concise **`What's covered`**
+  (a few short bullets, Claude Sonnet 4.6), the full **`Raw email`** copy, an `Email link`
+  (the "view in browser" URL), a `Slack link` to the source message, and `Organization`
+  linked to the matching Charities record when confident.
 - **Dedup:** upserts on `Source Msg TS` (the Slack message ts) — no state file; it scans a
   lookback window (`MEL_NEWSLETTER_LOOKBACK_DAYS`, default 14) each run.
 - **Run it:** `python3 newsletter_intake.py` (`--dry-run` to preview, `--since-days N`).
 - **Schedule:** its own workflow `.github/workflows/newsletter-intake.yml`, daily, using
   the same three repo secrets.
 - **Weekly digest:** `newsletter_digest.py` (workflow `.github/workflows/newsletter-digest.yml`,
-  Mondays) reads the past week's rows from this table, has Claude group the updates into
-  **Hiring / Progress / New evidence & evaluations / Funding**, and posts the digest to
-  **#aim-staff** (`MEL_DIGEST_CHANNEL`, default `CMS6V5XEJ`). Preview with
+  Mondays) reads the past week's rows from this table and posts a digest to **#aim-staff**
+  (`MEL_DIGEST_CHANNEL`, default `CMS6V5XEJ`), **grouped by organisation** — each org headed
+  by a link to its "view in browser" email, with a few bullets of noteworthy updates
+  (hiring, progress, new evidence/evaluations, funding, etc.). Preview with
   `python3 newsletter_digest.py --dry-run`.
 
 > This writes to its **own** new table, so it does not conflict with any older newsletter

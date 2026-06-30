@@ -29,6 +29,19 @@ log = logging.getLogger("newsletter_intake")
 SKIP_SENDERS = {"forwarding-noreply@google.com"}
 SKIP_SUBJECT_RE = re.compile(r"forwarding confirmation", re.IGNORECASE)
 
+_BROWSER_LINK_RE = re.compile(
+    r"view\s+(?:this\s+)?(?:e-?mail\s+)?(?:in\s+(?:your\s+)?browser|online)", re.IGNORECASE)
+
+
+def extract_browser_link(body: str) -> str:
+    """Pull the 'View this email in your browser' URL out of a newsletter body."""
+    m = _BROWSER_LINK_RE.search(body or "")
+    if not m:
+        return ""
+    tail = body[m.end(): m.end() + 400]
+    um = re.search(r"https?://\S+", tail)
+    return um.group(0).rstrip(").,]>\"'") if um else ""
+
 
 def extract_email_posts(messages: list[dict]) -> list[dict]:
     """Pull real newsletter emails out of #mel-intake messages.
@@ -55,6 +68,7 @@ def extract_email_posts(messages: list[dict]) -> list[dict]:
                 "sender_name": frm.get("name") or "",
                 "sender_addr": addr,
                 "body": body,
+                "browser_link": extract_browser_link(body),
                 "date": datetime.fromtimestamp(float(m.get("ts", 0))).strftime("%Y-%m-%d"),
             })
     return out
@@ -179,6 +193,7 @@ def main() -> int:
             "From": sender,
             "What's covered": s["whats_covered"],
             "Raw email": p["body"][:90000],  # the raw copy (Airtable long-text limit ~100k)
+            "Email link": p["browser_link"],
             "Source Msg TS": p["ts"],
             "Slack link": f"https://{workspace}.slack.com/archives/{intake_channel}/p{p['ts'].replace('.', '')}",
         }

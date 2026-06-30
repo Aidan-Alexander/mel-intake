@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.aidanalexander.melintake</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Library/Frameworks/Python.framework/Versions/3.14/bin/python3</string>
+        <string>/Users/aidanalexander/Library/CloudStorage/GoogleDrive-aidan@charityentrepreneurship.com/My Drive/Claude Code/mel-intake/mel_intake.py</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/aidanalexander/Library/CloudStorage/GoogleDrive-aidan@charityentrepreneurship.com/My Drive/Claude Code/mel-intake</string>
+
+    <!-- Fires at 10:00, then retries at 12:00, 14:00, 16:00, 17:30 (local time).
+         The script only actually runs once per day: the first attempt that succeeds
+         records the date in state.json, and the later attempts skip. The extra times
+         are a safety net so a Mac that was asleep/closed at 10:00 still gets a run
+         when it next wakes. (A Mac that's asleep across several fire times wakes and
+         runs once, not once per missed slot.) Edit/add/remove <dict> entries to
+         change the times. -->
+    <key>StartCalendarInterval</key>
+    <array>
+        <dict><key>Hour</key><integer>10</integer><key>Minute</key><integer>0</integer></dict>
+        <dict><key>Hour</key><integer>12</integer><key>Minute</key><integer>0</integer></dict>
+        <dict><key>Hour</key><integer>14</integer><key>Minute</key><integer>0</integer></dict>
+        <dict><key>Hour</key><integer>16</integer><key>Minute</key><integer>0</integer></dict>
+        <dict><key>Hour</key><integer>17</integer><key>Minute</key><integer>30</integer></dict>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin</string>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/Users/aidanalexander/.mel-intake/launchd.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/aidanalexander/.mel-intake/launchd.err.log</string>
+
+    <key>RunAtLoad</key>
+    <false/>
+</dict>
+</plist>

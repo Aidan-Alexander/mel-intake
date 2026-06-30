@@ -33,6 +33,16 @@ DIGEST_SYSTEM = (
     "product/programme features, milestones); new evidence or evaluations; funding received; "
     "and any other genuinely notable news. Keep bullets short and scannable, keep key "
     "numbers, omit fluff/events/minor news, and do not invent anything.\n\n"
+    "CRITICAL — each section must be about THE ORGANISATION ITSELF only. Include its own "
+    "direct actions: hires/departures, strategy, products/programmes it runs, partnerships it "
+    "forms, research/evaluations IT publishes, funding IT receives, and content IT produces "
+    "(blog series, reports, tools, surveys). EXCLUDE the achievements, milestones, legislative "
+    "wins, launches, or results of the charities/grantees/partners it recommends, funds, or "
+    "regrants to — EVEN when the newsletter presents them as 'highlights', 'wins', or outcomes "
+    "of its support. Example to omit: a climate regranter reporting that a recommended charity "
+    "helped pass a law, or that a grantee launched a consortium — that is NOT an update about "
+    "the regranter. If, after excluding such third-party news, an organisation has nothing "
+    "notable about itself, return an empty array for it (its section is then dropped).\n\n"
     "Return ONLY a JSON object mapping each organisation's exact name (the value after "
     "'ORG:') to an array of bullet strings (plain text, no leading bullet character)."
 )
@@ -174,7 +184,7 @@ def main() -> int:
 
     start = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%-d %b")
     end = datetime.now(timezone.utc).strftime("%-d %b")
-    header = f"*Newsletter digest — {start}–{end}*\n\n"
+    header = f"*Charity newsletter roundup for {start}–{end}*\n\n"
     message = header + "\n\n".join(sections)
 
     if args.dry_run:

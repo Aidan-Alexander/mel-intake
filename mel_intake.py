@@ -564,13 +564,14 @@ def match_charity(name: str | None, acronym: str | None, charities: list[dict]) 
     return None
 
 
-def upsert_records(token: str, base_id: str, table: str, records: list[dict]) -> None:
-    """Upsert rows, deduping on 'Thread Key'. Chunks of 10, throttled to <5 req/s/base."""
+def upsert_records(token: str, base_id: str, table: str, records: list[dict],
+                   merge_field: str = "Thread Key") -> None:
+    """Upsert rows, deduping on `merge_field`. Chunks of 10, throttled to <5 req/s/base."""
     url = f"{AIRTABLE_API}/{base_id}/{table}"
     for i in range(0, len(records), 10):
         chunk = records[i : i + 10]
         payload = {
-            "performUpsert": {"fieldsToMergeOn": ["Thread Key"]},
+            "performUpsert": {"fieldsToMergeOn": [merge_field]},
             "records": [{"fields": f} for f in chunk],
         }
         for attempt in range(4):

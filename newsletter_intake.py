@@ -61,17 +61,14 @@ def extract_email_posts(messages: list[dict]) -> list[dict]:
 
 
 NEWSLETTER_SYSTEM = (
-    "You are a monitoring, evaluation & learning (MEL) analyst at Ambitious Impact (AIM). "
-    "You are given a charity/organisation newsletter that was emailed to AIM. Extract a "
-    "structured, factual update for AIM's Newsletters tracker. Be concise; do not invent "
-    "anything not in the newsletter; ignore boilerplate (unsubscribe, 'view in browser', "
-    "social links).\n\n"
+    "You are a MEL analyst at Ambitious Impact (AIM). You are given a charity/organisation "
+    "newsletter (a forwarded email). Produce a high-level overview of what it covers for "
+    "AIM's newsletter tracker. Ignore boilerplate (unsubscribe, 'view in browser', social "
+    "links). Do not invent anything not in the email.\n\n"
     "Respond with ONLY a JSON object — no prose, no code fences — with exactly these keys:\n"
     '  "organization_name": string or null  (the org the newsletter is from, e.g. "Fish Welfare Initiative")\n'
-    '  "organization_updates": string  (org-level news: team/hiring changes, strategy, funding, partnerships; "" if none)\n'
-    '  "implementation_updates": string  (programme/field/operational updates and results, with numbers kept exact; "" if none)\n'
-    '  "new_evaluations": string  (any new evaluations, studies, reviews or evidence published; "" if none)\n'
-    '  "links": string  (key URLs worth keeping, each on its own line as "label: url"; "" if none)'
+    '  "whats_covered": string  (4-8 short, high-level bullet points, each starting with "- " on its own line, '
+    "summarising what the email covers; keep important numbers; scannable, no fluff)"
 )
 
 
@@ -104,10 +101,10 @@ def _parse_json(text: str) -> dict:
     except json.JSONDecodeError:
         m = re.search(r"\{.*\}", candidate, re.DOTALL)
         data = json.loads(m.group(0)) if m else {}
-    keys = ("organization_name", "organization_updates", "implementation_updates",
-            "new_evaluations", "links")
-    out = {k: (data.get(k) or "") for k in keys}
-    out["organization_name"] = out["organization_name"] or None
+    out = {
+        "organization_name": data.get("organization_name") or None,
+        "whats_covered": (data.get("whats_covered") or "").strip(),
+    }
     return out
 
 
@@ -125,7 +122,7 @@ def main() -> int:
     workspace = os.environ.get("SLACK_WORKSPACE", "ceincubationprogram")
     intake_channel = os.environ.get("MEL_INTAKE_CHANNEL", "C0B9WG6UY4W")
     base_id = os.environ.get("AIRTABLE_BASE_ID", "app6tmBJhcfCS7FLs")
-    table_id = os.environ.get("AIRTABLE_NEWSLETTERS_TABLE_ID", "tblRO95WP3EUApLtG")
+    table_id = os.environ.get("AIRTABLE_NEWSLETTERS_TABLE_ID", "tblr8m5vdnya1PmzD")
     charities_table = os.environ.get("AIRTABLE_CHARITIES_TABLE_ID", "tblSsWP0lp1fH9kk6")
     model = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-6")
     history_limit = args.limit or int(os.environ.get("SLACK_HISTORY_LIMIT", "200"))
@@ -179,11 +176,11 @@ def main() -> int:
         fields = {
             "Subject": p["subject"],
             "Date": p["date"],
-            "Organization Updates": s["organization_updates"],
-            "Implementation Updates": s["implementation_updates"],
-            "New Evaluations": s["new_evaluations"],
-            "Links": s["links"],
+            "From": sender,
+            "What's covered": s["whats_covered"],
+            "Raw email": p["body"][:90000],  # the raw copy (Airtable long-text limit ~100k)
             "Source Msg TS": p["ts"],
+            "Slack link": f"https://{workspace}.slack.com/archives/{intake_channel}/p{p['ts'].replace('.', '')}",
         }
         rec_id = mel.match_charity(s.get("organization_name"), None, charities)
         if rec_id:

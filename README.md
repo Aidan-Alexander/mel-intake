@@ -206,25 +206,25 @@ UTC so a BST/GMT switch shifts the London time by an hour.
 ## Newsletter intake (a second, separate job)
 
 `newsletter_intake.py` is an independent job: it imports **charity newsletters** that
-Morgan forwards into #mel-intake (via Slack's email-to-channel integration) into the
-Airtable **Newsletters** table — separate from the thread→MEL-Notes bot above.
+Morgan forwards into #mel-intake (via Slack's email-to-channel integration) into a dedicated
+Airtable table, **"Newsletter Intake"** (`tblr8m5vdnya1PmzD`) — separate from the
+thread→MEL-Notes bot above.
 
 - **Source:** Slackbot email posts in #mel-intake (a message whose `files[]` has a
   `filetype:"email"` entry carrying `subject`, `from`, and the full `plain_text` body
   inline). Google "forwarding confirmation" emails are skipped.
-- **Per newsletter:** Claude Sonnet 4.6 extracts `Organization Updates`,
-  `Implementation Updates`, `New Evaluations`, and `Links`; sets `Subject` and `Date`, and
-  links `Organization` to the matching Charities record when confident.
+- **Per newsletter (one row):** `Subject`, `Date`, `From`, a high-level **`What's covered`**
+  bullet summary (Claude Sonnet 4.6), the full **`Raw email`** copy, a `Slack link` to the
+  source message, and `Organization` linked to the matching Charities record when confident.
 - **Dedup:** upserts on `Source Msg TS` (the Slack message ts) — no state file; it scans a
   lookback window (`MEL_NEWSLETTER_LOOKBACK_DAYS`, default 14) each run.
 - **Run it:** `python3 newsletter_intake.py` (`--dry-run` to preview, `--since-days N`).
 - **Schedule:** its own workflow `.github/workflows/newsletter-intake.yml`, daily, using
   the same three repo secrets. No digest yet (a planned later addition).
 
-> ⚠️ This **replaces** a previous newsletter automation that was already populating the
-> Newsletters table. That old automation is **not part of this repo** (likely an Airtable
-> automation / Zapier / Make) and must be turned off, or you'll get duplicate rows. Tell
-> the rows apart: ones from this job have `Subject` + `Source Msg TS` set; the old ones don't.
+> This writes to its **own** new table, so it does not conflict with any older newsletter
+> automation pointing at the pre-existing `Newsletters` table — they populate different
+> tables. Retire the old one whenever you like.
 
 ## Logs & state
 

@@ -184,7 +184,7 @@ def main() -> int:
 
     start = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%-d %b")
     end = datetime.now(timezone.utc).strftime("%-d %b")
-    header = f"*Charity newsletter roundup for {start}–{end}*\n\n"
+    header = f"🤖 *Charity newsletter roundup for {start}–{end}*\n\n"
     message = header + "\n\n".join(sections)
 
     if args.dry_run:

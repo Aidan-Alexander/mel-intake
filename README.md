@@ -226,8 +226,15 @@ thread→MEL-Notes bot above.
   Mondays) reads the past week's rows from this table and posts a digest to **#aim-staff**
   (`MEL_DIGEST_CHANNEL`, default `CMS6V5XEJ`), **grouped by organisation** — each org headed
   by a link to its "view in browser" email, with a few bullets of noteworthy updates
-  (hiring, progress, new evidence/evaluations, funding, etc.). Preview with
-  `python3 newsletter_digest.py --dry-run`.
+  (hiring, progress, new evidence/evaluations, funding, etc.), scoped to each org's *own*
+  news (grantee/recommended-charity news is excluded). The message is prefixed with 🤖 so
+  staff know it's automated. Preview with `python3 newsletter_digest.py --dry-run`.
+- **Quarterly coverage check:** `charity_newsletter_check.py` (workflow
+  `.github/workflows/charity-newsletter-check.yml`, 1st of Mar/Jun/Sep/Dec) lists active
+  charities (Charities table, `Status = Active`) that have sent **no** newsletter to the
+  Newsletter Intake table in the last 90 days, and DMs **Morgan Fairless**
+  (`MEL_MORGAN_USER_ID`, default `U0479N9QX5W`) the list so subscriptions can be checked.
+  Preview with `python3 charity_newsletter_check.py --dry-run`.
 
 > This writes to its **own** new table, so it does not conflict with any older newsletter
 > automation pointing at the pre-existing `Newsletters` table — they populate different

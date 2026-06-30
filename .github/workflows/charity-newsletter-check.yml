@@ -1,0 +1,30 @@
+name: Charity newsletter coverage check
+
+on:
+  schedule:
+    - cron: "0 9 1 3,6,9,12 *"   # 09:00 on the 1st of Mar/Jun/Sep/Dec (quarterly)
+  workflow_dispatch: {}           # manual "Run workflow" button
+
+permissions:
+  contents: read
+
+concurrency:
+  group: charity-newsletter-check
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    env:
+      TZ: Europe/London
+      SLACK_USER_TOKEN: ${{ secrets.SLACK_USER_TOKEN }}
+      AIRTABLE_API_KEY: ${{ secrets.AIRTABLE_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Run coverage check
+        run: python charity_newsletter_check.py

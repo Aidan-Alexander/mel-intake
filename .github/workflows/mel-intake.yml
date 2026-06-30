@@ -1,0 +1,53 @@
+name: MEL intake
+
+on:
+  schedule:
+    # Cron is UTC. With TZ=Europe/London below, the script's own once-a-day guard and
+    # Saturday-skip use London time. First fire ~10:00 London (BST) / 09:00 (GMT);
+    # the second is a safety net — the once-a-day guard makes it a no-op if the first ran.
+    - cron: "0 9 * * *"
+    - cron: "0 13 * * *"
+  workflow_dispatch:           # manual "Run workflow" button
+    inputs:
+      force:
+        description: "Run even if already ran today / on a Saturday"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write              # needed to commit the updated state file back to the repo
+
+concurrency:
+  group: mel-intake            # never let two runs overlap
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    env:
+      TZ: Europe/London
+      MEL_INTAKE_HOME: ${{ github.workspace }}/state
+      SLACK_USER_TOKEN: ${{ secrets.SLACK_USER_TOKEN }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      AIRTABLE_API_KEY: ${{ secrets.AIRTABLE_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run MEL intake
+        run: python mel_intake.py ${{ (inputs.force && '--force') || '' }}
+
+      - name: Commit updated state
+        if: always()           # persist the watermark even if the run failed
+        run: |
+          git config user.name "mel-intake-bot"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add state/state.json 2>/dev/null || true
+          git diff --cached --quiet && echo "no state change" || git commit -m "Update MEL intake state [skip ci]"
+          git push || echo "nothing to push"

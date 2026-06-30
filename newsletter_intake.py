@@ -67,8 +67,8 @@ NEWSLETTER_SYSTEM = (
     "links). Do not invent anything not in the email.\n\n"
     "Respond with ONLY a JSON object — no prose, no code fences — with exactly these keys:\n"
     '  "organization_name": string or null  (the org the newsletter is from, e.g. "Fish Welfare Initiative")\n'
-    '  "whats_covered": string  (4-8 short, high-level bullet points, each starting with "- " on its own line, '
-    "summarising what the email covers; keep important numbers; scannable, no fluff)"
+    '  "whats_covered": string  (2-4 VERY short bullet points, each starting with "- " on its own line; '
+    "each a brief phrase under ~10 words, not a full sentence; only the most important items)"
 )
 
 

@@ -220,7 +220,12 @@ thread→MEL-Notes bot above.
   lookback window (`MEL_NEWSLETTER_LOOKBACK_DAYS`, default 14) each run.
 - **Run it:** `python3 newsletter_intake.py` (`--dry-run` to preview, `--since-days N`).
 - **Schedule:** its own workflow `.github/workflows/newsletter-intake.yml`, daily, using
-  the same three repo secrets. No digest yet (a planned later addition).
+  the same three repo secrets.
+- **Weekly digest:** `newsletter_digest.py` (workflow `.github/workflows/newsletter-digest.yml`,
+  Mondays) reads the past week's rows from this table, has Claude group the updates into
+  **Hiring / Progress / New evidence & evaluations / Funding**, and posts the digest to
+  **#aim-staff** (`MEL_DIGEST_CHANNEL`, default `CMS6V5XEJ`). Preview with
+  `python3 newsletter_digest.py --dry-run`.
 
 > This writes to its **own** new table, so it does not conflict with any older newsletter
 > automation pointing at the pre-existing `Newsletters` table — they populate different

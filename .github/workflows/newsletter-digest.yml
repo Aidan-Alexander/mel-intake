@@ -1,0 +1,31 @@
+name: Newsletter digest
+
+on:
+  schedule:
+    - cron: "0 8 * * 1"      # Mondays ~09:00 London (BST) / 08:00 (GMT)
+  workflow_dispatch: {}        # manual "Run workflow" button
+
+permissions:
+  contents: read
+
+concurrency:
+  group: newsletter-digest
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    env:
+      TZ: Europe/London
+      SLACK_USER_TOKEN: ${{ secrets.SLACK_USER_TOKEN }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      AIRTABLE_API_KEY: ${{ secrets.AIRTABLE_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Post weekly newsletter digest
+        run: python newsletter_digest.py

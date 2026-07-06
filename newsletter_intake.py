@@ -30,7 +30,12 @@ SKIP_SENDERS = {"forwarding-noreply@google.com"}
 SKIP_SUBJECT_RE = re.compile(r"forwarding confirmation", re.IGNORECASE)
 
 _BROWSER_LINK_RE = re.compile(
-    r"view\s+(?:this\s+)?(?:e-?mail\s+)?(?:in\s+(?:your\s+)?browser|online)", re.IGNORECASE)
+    r"view\s+(?:this\s+|the\s+)?(?:e-?mail\s+|newsletter\s+)?"
+    r"(?:in\s+(?:your\s+)?browser|online"       # ...in your browser / online
+    r"|(?:by\s+)?click(?:ing)?\s+here"          # ...(by) clicking here (HTML-only stubs)
+    r"|here\b)"                                  # ...here
+    r"|click\s+here\s+to\s+view",               # click here to view
+    re.IGNORECASE)
 
 
 def extract_browser_link(body: str) -> str:

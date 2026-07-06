@@ -20,6 +20,7 @@ import os
 import re
 import sys
 from datetime import datetime, timedelta, timezone
+from html import unescape
 
 import mel_intake as mel  # shared: slack(), fetch_charities(), match_charity(), upsert_records(), etc.
 
@@ -39,13 +40,34 @@ _BROWSER_LINK_RE = re.compile(
 
 
 def extract_browser_link(body: str) -> str:
-    """Pull the 'View this email in your browser' URL out of a newsletter body."""
+    """Pull the 'View this email in your browser' URL out of a plain-text newsletter body."""
     m = _BROWSER_LINK_RE.search(body or "")
     if not m:
         return ""
     tail = body[m.end(): m.end() + 400]
     um = re.search(r"https?://\S+", tail)
     return um.group(0).rstrip(").,]>\"'") if um else ""
+
+
+# The "view in browser" link is far more reliable to read from the HTML: match an <a> whose
+# anchor TEXT says view/open/read ... browser/online/web-version and take its href. Plain-text
+# phrasing varies wildly ("open the message in a browser", "view by clicking here", ...) and
+# the URL there often isn't adjacent to the phrase.
+_ANCHOR_RE = re.compile(r'<a\b[^>]*\bhref\s*=\s*["\']([^"\']+)["\'][^>]*>(.*?)</a>', re.I | re.S)
+_BROWSER_ANCHOR_TEXT_RE = re.compile(
+    r'(?:view|open|read|see)\b[^<]{0,40}?\b(?:browser|online|web\s*version|web\s*page|webpage)'
+    r'|web\s*version',
+    re.I)
+
+
+def browser_link_from_html(raw_html: str) -> str:
+    """Find the 'view in browser / view online' URL by matching anchor text in the HTML."""
+    for m in _ANCHOR_RE.finditer(raw_html or ""):
+        text = re.sub(r"<[^>]+>", " ", m.group(2))
+        text = re.sub(r"\s+", " ", text).strip()
+        if text and _BROWSER_ANCHOR_TEXT_RE.search(text):
+            return unescape(m.group(1).strip())
+    return ""
 
 
 def extract_email_posts(messages: list[dict]) -> list[dict]:
@@ -188,18 +210,26 @@ def main() -> int:
     records, errors = [], 0
     for p in posts:
         sender = f"{p['sender_name']} <{p['sender_addr']}>".strip()
-
-        # HTML-only newsletters land as a content-less plain-text stub. Slack keeps the full
-        # HTML, so download it and recover the real text for the summary + stored copy.
         body = p["body"]
-        if mel.is_contentless(body) and p.get("dl_url"):
+        browser_link = p["browser_link"]
+
+        # Download the full HTML (Slack keeps it at url_private_download) when we need it: to
+        # recover content from a plain-text stub, or to find the "view in browser" link that
+        # the plain text didn't yield. One download serves both.
+        if p.get("dl_url") and (mel.is_contentless(body) or not browser_link):
             html_bytes = mel.download_slack_file(p["dl_url"], max_bytes=3_000_000, allow_html=True)
             if html_bytes:
-                text = mel.html_to_text(html_bytes.decode("utf-8", "replace"))
-                if len(text) > len(body):  # only if we actually recovered more content
-                    log.info("Recovered %d chars of HTML content for %r (stub was %d).",
-                             len(text), p["subject"], len(body))
-                    body = text
+                raw_html = html_bytes.decode("utf-8", "replace")
+                if mel.is_contentless(body):
+                    text = mel.html_to_text(raw_html)
+                    if len(text) > len(body):  # only if we actually recovered more content
+                        log.info("Recovered %d chars of HTML content for %r (stub was %d).",
+                                 len(text), p["subject"], len(body))
+                        body = text
+                if not browser_link:
+                    browser_link = browser_link_from_html(raw_html)
+                    if browser_link:
+                        log.info("Captured 'view in browser' link from HTML for %r.", p["subject"])
 
         try:
             s = summarise_newsletter(p["subject"], sender, body, anthropic_key, model)
@@ -214,7 +244,7 @@ def main() -> int:
             "From": sender,
             "What's covered": s["whats_covered"],
             "Raw email": body[:90000],  # recovered/plain-text copy (Airtable long-text limit ~100k)
-            "Email link": p["browser_link"],
+            "Email link": browser_link,
             "Source Msg TS": p["ts"],
             "Slack link": f"https://{workspace}.slack.com/archives/{intake_channel}/p{p['ts'].replace('.', '')}",
         }

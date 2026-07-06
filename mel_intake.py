@@ -23,6 +23,7 @@ import sys
 import time
 import urllib.parse
 from datetime import datetime, timedelta, timezone
+from html.parser import HTMLParser
 from pathlib import Path
 
 import requests  # already used by the Slack skill
@@ -353,25 +354,87 @@ def extract_pdf_files(messages: list[dict]) -> list[dict]:
     return out
 
 
-def download_slack_file(url: str, max_bytes: int) -> bytes | None:
-    """Download a private Slack file with the user token. Returns bytes, or None on failure."""
+def download_slack_file(url: str, max_bytes: int, allow_html: bool = False) -> bytes | None:
+    """Download a private Slack file with the user token. Returns bytes, or None on failure.
+
+    By default an HTML response is treated as a failure (Slack returns an HTML login page
+    when the token is bad, and PDF downloads should never be HTML). Pass allow_html=True when
+    the file itself is HTML — e.g. an HTML email body fetched via url_private_download.
+    """
     headers = {"Authorization": f"Bearer {os.environ.get('SLACK_USER_TOKEN', '')}"}
     try:
         r = requests.get(url, headers=headers, timeout=90)
     except Exception as e:
-        log.warning("PDF download error for %s: %s", url[:80], e)
+        log.warning("Slack file download error for %s: %s", url[:80], e)
         return None
     if not r.ok:
-        log.warning("PDF download HTTP %s for %s", r.status_code, url[:80])
+        log.warning("Slack file download HTTP %s for %s", r.status_code, url[:80])
         return None
-    if "html" in r.headers.get("Content-Type", "").lower():
-        log.warning("PDF download returned an HTML page (auth failed?) for %s", url[:80])
+    if not allow_html and "html" in r.headers.get("Content-Type", "").lower():
+        log.warning("Slack file download returned an HTML page (auth failed?) for %s", url[:80])
         return None
     data = r.content
     if len(data) > max_bytes:
-        log.warning("PDF exceeds %d-byte cap (%d); skipping %s", max_bytes, len(data), url[:80])
+        log.warning("Slack file exceeds %d-byte cap (%d); skipping %s", max_bytes, len(data), url[:80])
         return None
     return data
+
+
+class _HTMLTextExtractor(HTMLParser):
+    """Collect readable text from HTML, dropping <style>/<script> and adding line breaks."""
+    _BLOCK = {"br", "p", "div", "tr", "li", "h1", "h2", "h3", "h4", "h5", "h6",
+              "table", "ul", "ol", "blockquote", "hr", "section", "header", "footer"}
+    _SKIP = {"style", "script", "head", "title", "meta", "link"}
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.parts: list[str] = []
+        self._skip = 0
+
+    def handle_starttag(self, tag, attrs):
+        if tag in self._SKIP:
+            self._skip += 1
+        elif tag in self._BLOCK:
+            self.parts.append("\n")
+
+    def handle_startendtag(self, tag, attrs):
+        if tag in self._BLOCK:
+            self.parts.append("\n")
+
+    def handle_endtag(self, tag):
+        if tag in self._SKIP and self._skip:
+            self._skip -= 1
+
+    def handle_data(self, data):
+        if not self._skip and data.strip():
+            self.parts.append(data)
+
+
+def html_to_text(raw_html: str, max_chars: int = 20000) -> str:
+    """Extract readable plain text from an HTML email body (stdlib only)."""
+    p = _HTMLTextExtractor()
+    try:
+        p.feed(raw_html or "")
+    except Exception as e:  # malformed HTML shouldn't sink the run
+        log.warning("html_to_text parse issue: %s", e)
+    text = "".join(p.parts).replace(" ", " ").replace("‌", "")  # nbsp, zero-width joiner
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n[ \t]+", "\n", text)
+    text = re.sub(r"\n{3,}", "\n\n", text).strip()
+    return text[:max_chars]
+
+
+def is_contentless(raw: str) -> bool:
+    """True if a body is just an HTML-only placeholder stub with no real content.
+
+    HTML-only mailers (MailerLite, some Mailchimp setups) put only a "your email can't
+    display HTML — view in browser" stub in the plain-text MIME part, which is all Slack's
+    email-to-channel integration forwards. Detected by tiny prose length once URLs are
+    stripped — distinct from a long-bodied regranter whose news is merely excluded.
+    """
+    prose = re.sub(r"https?://\S+", "", raw or "")
+    prose = re.sub(r"\s+", " ", prose).strip()
+    return len(prose) < 600
 
 
 def pdf_to_text(raw: bytes, max_chars: int) -> str:

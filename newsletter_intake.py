@@ -74,6 +74,9 @@ def extract_email_posts(messages: list[dict]) -> list[dict]:
                 "sender_addr": addr,
                 "body": body,
                 "browser_link": extract_browser_link(body),
+                # For HTML-only newsletters the plain_text is just a stub; the full HTML is
+                # downloadable here (Slack keeps it) so main() can recover the real content.
+                "dl_url": f.get("url_private_download") or f.get("url_private") or "",
                 "date": datetime.fromtimestamp(float(m.get("ts", 0))).strftime("%Y-%m-%d"),
             })
     return out
@@ -185,8 +188,21 @@ def main() -> int:
     records, errors = [], 0
     for p in posts:
         sender = f"{p['sender_name']} <{p['sender_addr']}>".strip()
+
+        # HTML-only newsletters land as a content-less plain-text stub. Slack keeps the full
+        # HTML, so download it and recover the real text for the summary + stored copy.
+        body = p["body"]
+        if mel.is_contentless(body) and p.get("dl_url"):
+            html_bytes = mel.download_slack_file(p["dl_url"], max_bytes=3_000_000, allow_html=True)
+            if html_bytes:
+                text = mel.html_to_text(html_bytes.decode("utf-8", "replace"))
+                if len(text) > len(body):  # only if we actually recovered more content
+                    log.info("Recovered %d chars of HTML content for %r (stub was %d).",
+                             len(text), p["subject"], len(body))
+                    body = text
+
         try:
-            s = summarise_newsletter(p["subject"], sender, p["body"], anthropic_key, model)
+            s = summarise_newsletter(p["subject"], sender, body, anthropic_key, model)
         except Exception as e:
             log.error("Summarisation failed for %r (%s); skipping this run.", p["subject"], e)
             errors += 1
@@ -197,7 +213,7 @@ def main() -> int:
             "Date": p["date"],
             "From": sender,
             "What's covered": s["whats_covered"],
-            "Raw email": p["body"][:90000],  # the raw copy (Airtable long-text limit ~100k)
+            "Raw email": body[:90000],  # recovered/plain-text copy (Airtable long-text limit ~100k)
             "Email link": p["browser_link"],
             "Source Msg TS": p["ts"],
             "Slack link": f"https://{workspace}.slack.com/archives/{intake_channel}/p{p['ts'].replace('.', '')}",

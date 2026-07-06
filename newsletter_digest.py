@@ -128,21 +128,6 @@ def _norm(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "").lower()).strip()
 
 
-def is_contentless(raw: str) -> bool:
-    """True if the plain-text body is just an HTML-only placeholder with no real content.
-
-    HTML-only mailers (MailerLite, some Mailchimp setups) send a plain-text part that is
-    only a "your email can't display HTML — view in browser" stub. Slack's email-to-channel
-    integration forwards just that part, so there's nothing to summarise and the model
-    returns no bullets. We detect these by their tiny prose length (URLs stripped) rather
-    than dropping them like a regranter whose only news is excluded grantee wins (those
-    bodies are long).
-    """
-    prose = re.sub(r"https?://\S+", "", raw or "")   # drop the tracking/view URLs
-    prose = re.sub(r"\s+", " ", prose).strip()
-    return len(prose) < 600
-
-
 def main() -> int:
     ap = argparse.ArgumentParser(description="Weekly newsletter digest (by org) -> #aim-staff.")
     ap.add_argument("--dry-run", action="store_true", help="Build and print the digest, but don't post.")
@@ -193,7 +178,7 @@ def main() -> int:
             # No bullets. If it's a content-less HTML-only stub (not a regranter with only
             # excluded grantee news), surface it with a link instead of dropping it silently.
             raw_all = "\n\n".join((r.get("Raw email") or "") for r in g["rows"])
-            if is_contentless(raw_all) and g["link"]:
+            if mel.is_contentless(raw_all) and g["link"]:
                 subj = max(g["rows"], key=lambda r: r.get("Date", "")).get("Subject", "").strip()
                 note = f"• _{subj}_ — HTML-only email, open to read." if subj \
                     else "• _HTML-only email — open to read._"

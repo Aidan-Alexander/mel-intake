@@ -196,8 +196,13 @@ re-running only updates existing rows. `mel_intake.py` posts a threaded
 - **Links inside threads** are kept as readable text and their unfurl previews are included,
   but links are not followed (the linked page isn't fetched).
 - **Newsletter emails** arrive as Slack email-integration posts — the `subject`, `from`, and
-  full `plain_text` body are inline in the message's `files[]`, so no download/parsing of the
-  raw email is needed. Google "forwarding confirmation" emails are skipped.
+  `plain_text` body are inline in the message's `files[]`. Google "forwarding confirmation"
+  emails are skipped.
+- **HTML-only newsletters** (MailerLite, some Mailchimp setups) send only a "can't display
+  HTML — view in browser" stub in the plain-text part. When intake sees such a stub it
+  downloads the full HTML (Slack keeps it, fetched with the same user token) and converts it
+  to text, so the real content still reaches the summary and digest. If recovery ever fails,
+  the digest falls back to listing the org with a link to open the email.
 - **The digest** groups by organisation, links each org to its "view in browser" email, and
   is scoped to each org's **own** news — a recommender/regranter's grantee wins are excluded.
   Messages are prefixed with 🤖 so staff know they're automated.

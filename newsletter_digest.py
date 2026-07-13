@@ -55,7 +55,7 @@ def fetch_recent(token: str, base_id: str, table: str, days: int) -> list[dict]:
     url = f"{mel.AIRTABLE_API}/{base_id}/{table}"
     while True:
         params = {"pageSize": 100, "fields[]": ["Subject", "From", "Date", "Raw email",
-                                                 "Organization", "Email link", "Slack link"]}
+                                                 "Organization", "Email link"]}
         if offset:
             params["offset"] = offset
         r = requests.get(url, headers=mel.airtable_headers(token), params=params, timeout=30)
@@ -64,6 +64,9 @@ def fetch_recent(token: str, base_id: str, table: str, days: int) -> list[dict]:
         for rec in body.get("records", []):
             f = rec.get("fields", {})
             if f.get("Date") and f["Date"] >= cutoff:
+                # Fallback link target when the email has no public "view in browser" URL:
+                # the Airtable row itself (holds the recovered full copy + "What's covered").
+                f["_airtable_url"] = f"https://airtable.com/{base_id}/{table}/{rec['id']}"
                 out.append(f)
         offset = body.get("offset")
         if not offset:
@@ -94,7 +97,8 @@ def group_by_org(rows: list[dict], charities_by_id: dict) -> dict:
         d = row.get("Date", "")
         if d >= g["date"]:  # prefer the most recent newsletter's link
             g["date"] = d
-            g["link"] = row.get("Email link") or row.get("Slack link") or g["link"]
+            # public "view in browser" URL if the email had one, else the Airtable row
+            g["link"] = row.get("Email link") or row.get("_airtable_url") or g["link"]
     return groups
 
 

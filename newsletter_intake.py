@@ -269,6 +269,13 @@ def main() -> int:
 
     log.info("Done. newsletters=%d errors=%d%s",
              len(records), errors, " (dry-run: nothing written)" if args.dry_run else "")
+    if errors:
+        # Fail the run so GitHub emails Aidan. Failed emails are retried while they're inside the
+        # lookback window, but a lasting cause otherwise hides behind green runs: from Oct 2026 the
+        # Anthropic account was out of credit and nothing was imported for five weeks.
+        log.error("ALERT: %d of %d newsletter(s) could not be summarised; see the errors above.",
+                  errors, len(posts))
+        return 1
     return 0
 
 

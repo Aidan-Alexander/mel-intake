@@ -151,7 +151,10 @@ Repo: **github.com/Aidan-Alexander/mel-intake** (private).
 
 **Failure alerts:** a failed run turns red in the Actions tab and GitHub emails you — an
 out-of-band signal that doesn't depend on Slack being up. `mel_intake.py` also attempts a
-Slack DM on auth failure.
+Slack DM on auth failure. Both intakes also fail the run when any thread or newsletter
+couldn't be summarised (the item is retried on the next run), so a Claude API problem can't
+hide behind green runs. Before this was added, the Anthropic account ran out of credit in
+early Oct 2026 and every run stayed green for five weeks while importing nothing.
 
 Caveat: GitHub's scheduled runs are best-effort and can be delayed/rarely skipped under
 load — fine here, since the watermark / dedup catch anything missed on the next run.
@@ -209,6 +212,12 @@ re-running only updates existing rows. `mel_intake.py` posts a threaded
 - **Anthropic rate limit:** the org is on a tight 10,000 input-tokens/min tier, so the
   scripts cap input sizes and the SDK backs off/retries. A backlog processes a bit slowly;
   raising the API tier removes the throttle.
+- **Anthropic credit:** the API account is prepaid. When the balance runs out, every summary
+  fails with "Your credit balance is too low" and the intakes go red. Top up at
+  console.anthropic.com (Settings → Billing; turning on auto-reload stops it happening again),
+  then re-run. Thread links wait behind the watermark and are picked up automatically.
+  Newsletters older than the 14-day lookback need a one-off backfill:
+  `python3 newsletter_intake.py --since-days N`.
 
 ---
 

@@ -961,6 +961,14 @@ def main() -> int:
     log.info("Done. threads=%d rows=%d skipped=%d errors=%d watermark=%s%s",
              stats["threads"], stats["rows"], stats["skipped"], stats["errors"],
              watermark, " (dry-run: watermark not advanced)" if args.dry_run else "")
+    if stats["errors"]:
+        # Fail the run so GitHub emails Aidan (state is saved above, and the workflow commits it
+        # even on failure). Failed threads stay behind the watermark and are retried next run, but
+        # a lasting cause otherwise hides behind green runs: from Oct 2026 the Anthropic account
+        # was out of credit and two threads sat unprocessed for weeks.
+        log.error("ALERT: %d error(s) this run; see above. Failed threads are retried next run.",
+                  stats["errors"])
+        return 1
     return 0
 
 

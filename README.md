@@ -216,8 +216,9 @@ re-running only updates existing rows. `mel_intake.py` posts a threaded
   fails with "Your credit balance is too low" and the intakes go red. Top up at
   console.anthropic.com (Settings → Billing; turning on auto-reload stops it happening again),
   then re-run. Thread links wait behind the watermark and are picked up automatically.
-  Newsletters older than the 14-day lookback need a one-off backfill:
-  `python3 newsletter_intake.py --since-days N`.
+  Newsletters older than the 14-day lookback need a one-off backfill: Actions →
+  **Newsletter intake** → **Run workflow** with a bigger `since_days`
+  (or locally, `python3 newsletter_intake.py --since-days N`).
 
 ---
 

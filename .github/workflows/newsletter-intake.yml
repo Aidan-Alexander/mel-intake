@@ -3,7 +3,12 @@ name: Newsletter intake
 on:
   schedule:
     - cron: "0 8 * * *"      # ~09:00 London (BST) / 08:00 (GMT), daily
-  workflow_dispatch: {}        # manual "Run workflow" button
+  workflow_dispatch:           # manual "Run workflow" button
+    inputs:
+      since_days:
+        description: "Lookback in days (default 14). Raise it to backfill newsletters missed during an outage."
+        type: number
+        required: false
 
 permissions:
   contents: read               # no state to commit (dedupes via Airtable upsert)
@@ -20,6 +25,7 @@ jobs:
       SLACK_USER_TOKEN: ${{ secrets.SLACK_USER_TOKEN }}
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       AIRTABLE_API_KEY: ${{ secrets.AIRTABLE_API_KEY }}
+      MEL_NEWSLETTER_LOOKBACK_DAYS: ${{ inputs.since_days || 14 }}   # scheduled runs: 14
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

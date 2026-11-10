@@ -8,6 +8,8 @@ Morgan forwards newsletter subscriptions (from research@charityentrepreneurship.
 `plain_text` body inline. This job reads them, skips Google forwarding-confirmation emails,
 summarises each newsletter with Claude Sonnet 4.6, and upserts one row per newsletter into
 the Airtable Newsletters table — deduped on "Source Msg TS" (the Slack message ts).
+Newsletters that already have a row with a summary are skipped, so each one is summarised
+once; clear a row's "What's covered" and the next run redoes it.
 
 Reuses the Slack Web API layer, Airtable helpers, and charity matching from mel_intake.py.
 No digest (that's a separate, later job). Run `python3 newsletter_intake.py --help`.
@@ -19,8 +21,11 @@ import logging
 import os
 import re
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 from html import unescape
+
+import requests
 
 import mel_intake as mel  # shared: slack(), fetch_charities(), match_charity(), upsert_records(), etc.
 
@@ -152,6 +157,30 @@ def _parse_json(text: str) -> dict:
     return out
 
 
+def already_summarised(token: str, base_id: str, table: str, ts_values: list[str]) -> set[str]:
+    """Return the Slack ts of each newsletter that already has a row with a summary.
+
+    main() skips those, so each newsletter is summarised once instead of on every daily run
+    while it sits in the lookback window. A row whose "What's covered" is blank doesn't
+    count, so clearing that cell in Airtable makes the next run redo the summary.
+    """
+    url = f"{mel.AIRTABLE_API}/{base_id}/{table}"
+    done = set()
+    for i in range(0, len(ts_values), 40):  # 40 per request keeps the formula short
+        formula = "OR(" + ",".join(f"{{Source Msg TS}}='{ts}'" for ts in ts_values[i:i + 40]) + ")"
+        params = {"fields[]": ["Source Msg TS", "What's covered"],
+                  "filterByFormula": formula, "pageSize": 100}
+        r = requests.get(url, headers=mel.airtable_headers(token), params=params, timeout=30)
+        if not r.ok:
+            raise RuntimeError(f"Airtable lookup failed ({r.status_code}): {r.text[:300]}")
+        for rec in r.json().get("records", []):
+            f = rec.get("fields") or {}
+            if (f.get("What's covered") or "").strip():
+                done.add(f.get("Source Msg TS"))
+        time.sleep(0.25)  # stay under 5 requests/sec/base
+    return done
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Forwarded newsletters in #mel-intake -> Airtable Newsletters.")
     ap.add_argument("--dry-run", action="store_true", help="Summarise and print rows, but don't write to Airtable.")
@@ -196,8 +225,22 @@ def main() -> int:
     messages = [m for m in hist.get("messages", []) if float(m.get("ts", 0)) > since_ts]
     posts = extract_email_posts(messages)
     log.info("Found %d newsletter email(s) in the last %d days.", len(posts), lookback_days)
+
+    # Skip newsletters that already have a summary in Airtable. Until Nov 2026 every run
+    # summarised every email in the window again, so each newsletter cost ~14 Claude calls.
+    skipped = 0
+    if posts and airtable_token:
+        try:
+            done = already_summarised(airtable_token, base_id, table_id, [p["ts"] for p in posts])
+        except Exception as e:
+            log.error("ALERT: could not check Airtable for newsletters already imported (%s).", e)
+            return 1
+        new_posts = [p for p in posts if p["ts"] not in done]
+        skipped = len(posts) - len(new_posts)
+        posts = new_posts
+        log.info("%d already imported (skipped), %d to summarise.", skipped, len(posts))
     if not posts:
-        log.info("Done. nothing to import.")
+        log.info("Done. nothing new to import.")
         return 0
 
     charities = []
@@ -267,8 +310,8 @@ def main() -> int:
             log.error("ALERT: Airtable upsert failed (%s).", e)
             return 1
 
-    log.info("Done. newsletters=%d errors=%d%s",
-             len(records), errors, " (dry-run: nothing written)" if args.dry_run else "")
+    log.info("Done. newsletters=%d skipped=%d errors=%d%s",
+             len(records), skipped, errors, " (dry-run: nothing written)" if args.dry_run else "")
     if errors:
         # Fail the run so GitHub emails Aidan. Failed emails are retried while they're inside the
         # lookback window, but a lasting cause otherwise hides behind green runs: from Oct 2026 the

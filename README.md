@@ -143,8 +143,9 @@ Repo: **github.com/Aidan-Alexander/mel-intake** (private).
    - **Thread intake** — `mel-intake.yml`, 09:00 + 13:00 (once-a-day guard + Saturday skip
      in code; second fire is a safety net). Commits `state/state.json` back to the repo so
      the watermark persists across runs.
-   - **Newsletter intake** — `newsletter-intake.yml`, 08:00 daily. Stateless (dedupes via
-     Airtable upsert + a 14-day lookback).
+   - **Newsletter intake** — `newsletter-intake.yml`, 08:00 daily. Stateless: it skips any
+     newsletter that already has a summary in Airtable, so each one is summarised once, and
+     the 14-day lookback is how long a failed one keeps being retried.
    - **Weekly digest** — `newsletter-digest.yml`, Mondays 08:00.
    - **Coverage check** — `charity-newsletter-check.yml`, 09:00 on the 1st of
      Mar/Jun/Sep/Dec.
@@ -182,8 +183,10 @@ python3 newsletter_digest.py --dry-run          # weekly digest  (--since-days N
 python3 charity_newsletter_check.py --dry-run   # coverage check  (--since-days N)
 ```
 
-Real runs are idempotent: thread/newsletter intake upsert on their dedup keys, so
-re-running only updates existing rows. `mel_intake.py` posts a threaded
+Real runs are idempotent: thread intake upserts on its dedup key, so re-running only
+updates existing rows, and newsletter intake skips newsletters that already have a summary.
+To have one summarised again, clear its `What's covered` cell; the next run redoes it while
+the email is inside the lookback window (or use `--since-days N`). `mel_intake.py` posts a threaded
 **"🤖 … Captured to the Airtable"**-style reply once per intake message (tracked in state).
 
 ---
@@ -218,7 +221,8 @@ re-running only updates existing rows. `mel_intake.py` posts a threaded
   then re-run. Thread links wait behind the watermark and are picked up automatically.
   Newsletters older than the 14-day lookback need a one-off backfill: Actions →
   **Newsletter intake** → **Run workflow** with a bigger `since_days`
-  (or locally, `python3 newsletter_intake.py --since-days N`).
+  (or locally, `python3 newsletter_intake.py --since-days N`). Newsletters already imported
+  are skipped, so a wide window costs nothing extra.
 
 ---
 

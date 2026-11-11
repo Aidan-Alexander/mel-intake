@@ -32,6 +32,8 @@ import mel_intake as mel  # shared: slack(), fetch_charities(), match_charity(),
 
 log = logging.getLogger("newsletter_intake")
 
+PDF_TEXT_MAX = int(os.environ.get("MEL_PDF_TEXT_MAXCHARS", "12000"))  # per attached report
+
 # Email senders / subjects that are plumbing, not newsletters -> skip.
 SKIP_SENDERS = {"forwarding-noreply@google.com"}
 SKIP_SUBJECT_RE = re.compile(r"forwarding confirmation", re.IGNORECASE)
@@ -125,6 +127,9 @@ def extract_email_posts(messages: list[dict]) -> list[dict]:
                 # For HTML-only newsletters the plain_text is just a stub; the full HTML is
                 # downloadable here (Slack keeps it) so main() can recover the real content.
                 "dl_url": f.get("url_private_download") or f.get("url_private") or "",
+                # Files the email came with (FEM sends its quarterly report as a PDF).
+                "attachments": [{"filename": a.get("filename") or "", "url": a["url"]}
+                                for a in (f.get("attachments") or []) if a.get("url")],
                 "date": datetime.fromtimestamp(float(m.get("ts", 0))).strftime("%Y-%m-%d"),
             })
     return out
@@ -294,6 +299,19 @@ def main() -> int:
                     browser_link = browser_link_from_html(raw_html) or mailchimp_archive_link(raw_html)
                     if browser_link:
                         log.info("Captured 'view in browser' link from HTML for %r.", p["subject"])
+
+        # A report sent as an attachment is the real update (FEM's email is a short cover note
+        # for its quarterly report): add its text so the summary and the roundup cover it.
+        for a in p.get("attachments") or []:
+            if not a["filename"].lower().endswith(".pdf"):
+                continue
+            data = mel.download_slack_file(a["url"], max_bytes=50_000_000)
+            text = mel.pdf_to_text(data, PDF_TEXT_MAX) if data else ""
+            if text:
+                body += f"\n\n--- Attached report: {a['filename']} ---\n{text}"
+                log.info("Read %d chars from the attached %r.", len(text), a["filename"])
+            else:
+                log.warning("Couldn't read the attached %r for %r.", a["filename"], p["subject"])
 
         try:
             s = summarise_newsletter(p["subject"], sender, body, anthropic_key, model)

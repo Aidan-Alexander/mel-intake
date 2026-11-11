@@ -204,6 +204,33 @@ def slack(*args: str, workspace: str | None = None) -> dict:
     raise SlackCallError(f"unknown slack command: {cmd}")
 
 
+def slack_upload(channel: str, files: list[tuple[str, bytes]], thread_ts: str = "",
+                 comment: str = "") -> dict:
+    """Share files in a channel or thread as one message. Needs the files:write user scope.
+
+    Slack's upload flow: files.getUploadURLExternal per file, POST the bytes to the URL it
+    returns, then files.completeUploadExternal shares them. Raises SlackCallError on failure.
+    """
+    shared = []
+    for name, data in files:
+        j = _slack_post("files.getUploadURLExternal", {"filename": name, "length": str(len(data))})
+        if not j.get("ok"):
+            raise SlackCallError(f"files.getUploadURLExternal for {name!r} failed: {j.get('error')}")
+        r = requests.post(j["upload_url"], files={"file": (name, data)}, timeout=180)
+        if r.status_code != 200:
+            raise SlackCallError(f"upload of {name!r} failed ({r.status_code})")
+        shared.append({"id": j["file_id"], "title": name})
+    data = {"files": json.dumps(shared), "channel_id": channel}
+    if thread_ts:
+        data["thread_ts"] = thread_ts
+    if comment:
+        data["initial_comment"] = comment
+    j = _slack_post("files.completeUploadExternal", data)
+    if not j.get("ok"):
+        raise SlackCallError(f"files.completeUploadExternal failed: {j.get('error')}")
+    return j
+
+
 # ---------------------------------------------------------------------------
 # Permalink parsing
 # ---------------------------------------------------------------------------

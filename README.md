@@ -128,7 +128,9 @@ sensible defaults baked into the scripts and can be overridden by env vars — s
 
 The **Slack app** ("Mel intake", api.slack.com/apps) uses **user-token scopes**:
 `channels:history`, `groups:history`, `channels:read`, `groups:read`, `users:read`,
-`chat:write`, `files:read`. The token is long-lived (rotation off).
+`chat:write`, `files:read`, and `files:write` (added Nov 2026 so the digest can attach
+PDFs; without it the roundup still posts, the run goes red and the log says
+`missing_scope`). The token is long-lived (rotation off).
 
 ---
 
@@ -221,6 +223,16 @@ the email is inside the lookback window (or use `--since-days N`). `mel_intake.p
   website base's checkbox mirrors it by hand), especially for new animal charities. Links
   there go only to public web versions, never Airtable; an org whose email has no web version
   is shown unlinked. Set `MEL_COMMUNITY_CHANNEL=""` to stop posting there.
+- **Every email is linked or attached:** an email with a web version is linked (an org's
+  other emails go on an "Also:" line). One without is attached in the thread as a PDF of
+  the full email, printed with headless Chrome from the HTML Slack keeps, minus AIM's
+  unsubscribe and preference links, tracking pixels and AIM addresses. Any report an email
+  came with (PDF, Word, PowerPoint, Excel) is attached too. In #aim-community a file goes
+  only if its text could be read and names no undercover charity. Intake also reads
+  attached PDF reports (first ~12k chars, `MEL_PDF_TEXT_MAXCHARS`) into the summary and
+  `Raw email`, because some charities (FEM) send a short cover note with the real update
+  attached. To check without posting: Actions → **Newsletter digest** → Run workflow with
+  `dry_run` ticked, or locally `MEL_DIGEST_SAVE_DIR=<dir> python3 newsletter_digest.py --dry-run`.
 - **Web-version links:** Mailchimp emails without a "view in browser" link get their web
   version from the account and campaign ids in the unsubscribe link, and Mailchimp's
   subscriber id (`e=`) is stripped from links so they open the generic copy, not AIM's own.

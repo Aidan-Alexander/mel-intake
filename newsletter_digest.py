@@ -11,7 +11,14 @@ thread, each org headed by a link to its "view in browser" page so people can re
 #aim-staff gets every org, falling back to the org's Airtable row when an email has no web
 version. #aim-community is shared beyond AIM, so it only gets charities matched to a MEL
 Charities record whose "Undercover?" field is blank, links only to public pages, and drops
-any section that names an undercover charity. Run `python3 newsletter_digest.py --help`.
+any section that names an undercover charity.
+
+Every email is either linked or attached (Aidan, Nov 2026): one with a web version is
+linked; one without is attached to the thread as a PDF of the full email (rendered with
+headless Chrome, cleaned of AIM's unsubscribe links and address); and any report an email
+came with is attached too. Uploading needs the Slack app's files:write scope. In
+#aim-community a file is attached only if its text could be read and names no undercover
+charity. Run `python3 newsletter_digest.py --help`.
 """
 
 import argparse
@@ -19,9 +26,14 @@ import json
 import logging
 import os
 import re
+import shutil
+import subprocess
 import sys
+import tempfile
 import time
 from datetime import datetime, timedelta, timezone
+from html import escape, unescape
+from pathlib import Path
 
 import requests
 import mel_intake as mel  # shared Slack send, Airtable helpers, charity list, env loading
@@ -31,6 +43,7 @@ log = logging.getLogger("newsletter_digest")
 RAW_PER_ORG = 6000     # chars of raw email per org fed to the model
 TOTAL_CAP = 32000      # total chars across orgs (keeps under the token limit)
 SLACK_REPLY_MAX = 3800  # Slack shows up to ~4,000 characters a message, so long threads split
+REPORT_EXTS = (".pdf", ".docx", ".doc", ".pptx", ".ppt", ".xlsx", ".xls")  # attachments passed on
 
 DIGEST_SYSTEM = (
     "You are compiling a weekly internal digest for Ambitious Impact (AIM) staff from "
@@ -62,7 +75,7 @@ def fetch_recent(token: str, base_id: str, table: str, days: int) -> list[dict]:
     url = f"{mel.AIRTABLE_API}/{base_id}/{table}"
     while True:
         params = {"pageSize": 100, "fields[]": ["Subject", "From", "Date", "Raw email",
-                                                 "Organization", "Email link"]}
+                                                 "Organization", "Email link", "Source Msg TS"]}
         if offset:
             params["offset"] = offset
         r = requests.get(url, headers=mel.airtable_headers(token), params=params, timeout=30)
@@ -173,13 +186,31 @@ def _norm(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "").lower()).strip()
 
 
-def section(name: str, g: dict, bullets: list, link: str) -> str:
+def link_text(s: str) -> str:
+    return re.sub(r"[<>|]", " ", s or "").strip()
+
+
+def other_links(g: dict, heading_link: str) -> list[tuple[str, str]]:
+    """(subject, web version) of the org's other emails, so every email that has one is linked."""
+    seen, out = {heading_link}, []
+    for row in sorted(g["rows"], key=lambda r: r.get("Date", ""), reverse=True):
+        url = mel.clean_public_link(row.get("Email link") or "")
+        if url and url not in seen:
+            seen.add(url)
+            out.append((row.get("Subject") or "another email", url))
+    return out
+
+
+def section(name: str, g: dict, bullets: list, link: str, others: list = ()) -> str:
     """One org's block for the thread: its name (linked when there's a link) and its bullets."""
     head = f"*<{link}|{name}>*" if link else f"*{name}*"
     if len(g["rows"]) > 1:
         head += f"  _({len(g['rows'])} emails)_"
     if bullets:
-        return head + "\n" + "\n".join(f"• {b}" for b in bullets)
+        text = head + "\n" + "\n".join(f"• {b}" for b in bullets)
+        if others:
+            text += "\n_Also:_ " + ", ".join(f"<{u}|{link_text(s)}>" for s, u in others)
+        return text
     # No bullets. If it's a content-less HTML-only stub (not a regranter with only excluded
     # grantee news), point to the email instead of dropping it silently.
     raw_all = "\n\n".join((r.get("Raw email") or "") for r in g["rows"])
@@ -190,17 +221,153 @@ def section(name: str, g: dict, bullets: list, link: str) -> str:
     return ""
 
 
-def replies(sections: list[str], limit: int = SLACK_REPLY_MAX) -> list[str]:
-    """Pack the org sections into as few thread replies as fit under `limit` characters."""
-    out, cur = [], ""
-    for s in sections:
+def replies(sections: list[tuple[str, str]], limit: int = SLACK_REPLY_MAX) -> list[tuple[str, list[str]]]:
+    """Pack (org, text) sections into as few thread replies as fit under `limit` characters.
+    Returns (reply text, orgs in it) pairs."""
+    out, cur, names = [], "", []
+    for name, s in sections:
         if cur and len(cur) + 2 + len(s) > limit:
-            out.append(cur)
-            cur = ""
+            out.append((cur, names))
+            cur, names = "", []
         cur = f"{cur}\n\n{s}" if cur else s
+        names.append(name)
     if cur:
-        out.append(cur)
+        out.append((cur, names))
     return out
+
+
+# --- Full emails and the reports they came with ----------------------------------------------
+
+SUBSCRIBER_LINK = re.compile(
+    r"unsubscribe|opt.?out|preferences|update (your )?(profile|details)|manage (your )?subscription|"
+    r"forward (this|to a friend)|why did i get|abmelden|disiscriviti|cancella|cancelar|"
+    r"darse de baja|desuscrib|suscripci[oó]n|d[ée]sinscri|d[ée]sabonn", re.I)
+AIM_ADDRESS = re.compile(r"[\w.+-]+@(charityentrepreneurship\.com|ambitiousimpact\.com|[\w-]+\.slack\.com)",
+                         re.I)
+
+
+def sanitise_email(html: str) -> str:
+    """Strip what's tied to AIM's own subscription before an email is shared: unsubscribe,
+    preference and forward links, open-tracking pixels, and AIM or Slack addresses."""
+    html = re.sub(r"<a\b[^>]*>.*?</a>",
+                  lambda m: "" if SUBSCRIBER_LINK.search(m.group(0)) else m.group(0), html, flags=re.I | re.S)
+    tiny = re.compile(r'\b(width|height)\s*=\s*["\']?[0-2](px)?["\'\s/>]|(width|height)\s*:\s*[0-2]px', re.I)
+    html = re.sub(r"<img\b[^>]*>", lambda m: "" if tiny.search(m.group(0)) else m.group(0), html, flags=re.I)
+    return AIM_ADDRESS.sub("", html)
+
+
+def visible_text(html: str) -> str:
+    return unescape(re.sub(r"<[^>]+>", " ", re.sub(r"(?is)<(style|script)\b.*?</\1>", " ", html)))
+
+
+def chrome_binary() -> str | None:
+    for c in (os.environ.get("CHROME_BIN"), shutil.which("google-chrome"), shutil.which("google-chrome-stable"),
+              shutil.which("chromium"), shutil.which("chromium-browser"),
+              "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"):
+        if c and os.path.exists(c):
+            return c
+    return None
+
+
+def html_to_pdf(html: str) -> bytes:
+    """Print HTML to PDF with headless Chrome (preinstalled on GitHub's Ubuntu runners)."""
+    chrome = chrome_binary()
+    if not chrome:
+        raise RuntimeError("Chrome not found (set CHROME_BIN)")
+    with tempfile.TemporaryDirectory() as tmp:
+        src, pdf = Path(tmp) / "email.html", Path(tmp) / "email.pdf"
+        src.write_text(html, encoding="utf-8")
+        subprocess.run([chrome, "--headless=new", "--disable-gpu", "--no-sandbox", "--no-pdf-header-footer",
+                        f"--user-data-dir={Path(tmp) / 'profile'}", "--virtual-time-budget=10000",
+                        f"--print-to-pdf={pdf}", src.as_uri()], check=True, capture_output=True, timeout=180)
+        return pdf.read_bytes()
+
+
+def slack_email(channel: str, ts: str) -> dict | None:
+    """The forwarded email's Slack file (its HTML and attachments) for a Newsletter Intake row."""
+    j = mel._slack_post("conversations.history", {"channel": channel, "oldest": ts, "latest": ts,
+                                                  "inclusive": "true", "limit": "1"})
+    for m in j.get("messages") or []:
+        if m.get("ts") == ts:
+            return next((f for f in m.get("files") or [] if f.get("filetype") == "email"), None)
+    return None
+
+
+def email_pdf(email: dict, row: dict) -> tuple[bytes, str]:
+    """A cleaned PDF of a forwarded email with a one-line header. Returns (pdf, visible text)."""
+    raw = mel.download_slack_file(email.get("url_private_download") or email.get("url_private"),
+                                  max_bytes=10_000_000, allow_html=True)
+    if not raw:
+        raise RuntimeError("couldn't download the email from Slack")
+    html = sanitise_email(raw.decode("utf-8", "replace"))
+    sender = (row.get("From") or "").split("<")[0].strip() or "the sender"
+    try:
+        when = datetime.strptime(row.get("Date", ""), "%Y-%m-%d").strftime("%-d %B %Y")
+    except ValueError:
+        when = row.get("Date", "")
+    banner = ('<div style="font:13px/1.4 -apple-system,Helvetica,Arial,sans-serif;color:#555;'
+              'border-bottom:1px solid #ddd;padding:6px 0 8px;margin:0 0 12px">'
+              f'Newsletter from <b>{escape(sender)}</b>, received {escape(when)}: '
+              f'<i>{escape(row.get("Subject") or "")}</i></div>')
+    style = "<style>@page{margin:12mm}</style>"
+    html = (re.sub(r"<body\b[^>]*>", lambda m: m.group(0) + banner, html, count=1, flags=re.I)
+            if re.search(r"<body\b", html, re.I) else banner + html)
+    html = (re.sub(r"<head\b[^>]*>", lambda m: m.group(0) + style, html, count=1, flags=re.I)
+            if re.search(r"<head\b", html, re.I) else style + html)
+    return html_to_pdf(html), visible_text(html)
+
+
+def file_name(org: str, subject: str) -> str:
+    base = re.sub(r"\s+", " ", re.sub(r'[\\/:*?"<>|]+', " ", f"{org} - {subject}")).strip()
+    return base[:90].rstrip(" .-") + ".pdf"
+
+
+def org_files(name: str, g: dict, intake_channel: str, problems: list) -> list[dict]:
+    """Files to put under an org: a PDF of each email that has no web version, and every report
+    the emails came with. Each is {name, data, text (None if unreadable), kind}."""
+    out = []
+    for row in g["rows"]:
+        needs_pdf = not mel.clean_public_link(row.get("Email link") or "")
+        ts = row.get("Source Msg TS") or ""
+        email = slack_email(intake_channel, ts) if ts else None
+        if not email:
+            if needs_pdf:
+                problems.append(f"{name}: couldn't find {row.get('Subject')!r} in #mel-intake")
+            continue
+        if needs_pdf:
+            try:
+                data, text = email_pdf(email, row)
+                out.append({"name": file_name(name, row.get("Subject") or "email"), "data": data,
+                            "text": text, "kind": "email"})
+            except Exception as e:
+                problems.append(f"{name}: couldn't make a PDF of {row.get('Subject')!r} ({e})")
+        for a in email.get("attachments") or []:
+            fn = a.get("filename") or ""
+            if not fn.lower().endswith(REPORT_EXTS) or not a.get("url"):
+                continue
+            data = mel.download_slack_file(a["url"], max_bytes=50_000_000)
+            if not data:
+                problems.append(f"{name}: couldn't download the attached {fn!r}")
+                continue
+            text = mel.pdf_to_text(data, 500_000) if fn.lower().endswith(".pdf") else ""
+            out.append({"name": fn, "data": data, "text": text or None, "kind": "report"})
+    return out
+
+
+def files_comment(name: str, files: list[dict]) -> str:
+    emails = sum(f["kind"] == "email" for f in files)
+    reports = len(files) - emails
+    bits = []
+    if emails:
+        bits.append("full email" + ("s" if emails > 1 else "") + " (no web version)")
+    if reports:
+        bits.append(("its " if emails else "") + "attached report" + ("s" if reports > 1 else ""))
+    return f"📎 *{name}*: " + " and ".join(bits)
+
+
+def community_safe(files: list[dict], private_names: list[str]) -> list[dict]:
+    """Only files whose text could be read and names no undercover charity."""
+    return [f for f in files if f["text"] and not any(n in f["text"].lower() for n in private_names)]
 
 
 def send(channel: str, text: str, thread_ts: str = "", workspace: str | None = None) -> str:
@@ -211,12 +378,26 @@ def send(channel: str, text: str, thread_ts: str = "", workspace: str | None = N
     return j["ts"]
 
 
-def post_roundup(channel: str, header: str, sections: list[str], workspace: str) -> None:
-    """One short line in the channel; the org sections go in its thread."""
+def post_roundup(channel: str, header: str, sections: list[tuple[str, str]], files_for,
+                 workspace: str) -> list[str]:
+    """One short line in the channel; the org sections go in its thread, each reply followed by
+    the files of the orgs in it. Returns problems with files (a failed text post raises)."""
+    problems = []
     parent = send(channel, header, workspace=workspace)
-    for text in replies(sections):
+    for text, names in replies(sections):
         time.sleep(1)  # Slack allows about one message a second per channel
         send(channel, text, parent, workspace=workspace)
+        for name in names:
+            files = files_for(name)
+            if not files:
+                continue
+            time.sleep(1)
+            try:
+                mel.slack_upload(channel, [(f["name"], f["data"]) for f in files], thread_ts=parent,
+                                 comment=files_comment(name, files))
+            except mel.SlackCallError as e:
+                problems.append(f"{name} in {channel}: {e}")
+    return problems
 
 
 def main() -> int:
@@ -264,16 +445,17 @@ def main() -> int:
     staff, community, kept_out = [], [], []
     for name, g in sorted(groups.items(), key=lambda kv: kv[1]["date"], reverse=True):
         bl = bull_by_norm.get(_norm(name)) or []
-        s = section(name, g, bl, g["public_link"] or g["airtable_link"])
+        others = other_links(g, g["public_link"])
+        s = section(name, g, bl, g["public_link"] or g["airtable_link"], others)
         if not s:
             continue
-        staff.append(s)
+        staff.append((name, s))
         # #aim-community reaches people outside AIM: only charities matched to a MEL record
         # and not undercover, linked only to public pages, and never naming an undercover one.
         public = bool(g["ids"]) and not (g["ids"] & private_ids)
-        c = section(name, g, bl, g["public_link"]) if public else ""
+        c = section(name, g, bl, g["public_link"], others) if public else ""
         if c and not any(n in c.lower() for n in private_names):
-            community.append(c)
+            community.append((name, c))
         else:
             kept_out.append(name)
 
@@ -284,28 +466,58 @@ def main() -> int:
     start = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%-d %b")
     end = datetime.now(timezone.utc).strftime("%-d %b")
     header = f"🤖 *Charity newsletter roundup for {start}–{end}*"
-    targets = [(channel, staff)]
+
+    # Files are built once per org and shared by both channels; #aim-community only gets
+    # the ones whose text could be read and names no undercover charity.
+    intake_channel = os.environ.get("MEL_INTAKE_CHANNEL", "C0B9WG6UY4W")
+    file_problems, cache = [], {}
+
+    def staff_files(name: str) -> list[dict]:
+        if name not in cache:
+            cache[name] = org_files(name, groups[name], intake_channel, file_problems)
+        return cache[name]
+
+    def community_files(name: str) -> list[dict]:
+        return community_safe(staff_files(name), private_names)
+
+    targets = [(channel, staff, staff_files)]
     if community_channel and community:
-        targets.append((community_channel, community))
+        targets.append((community_channel, community, community_files))
     if community_channel and kept_out:
         log.info("Kept out of #aim-community (undercover, not matched to a charity, or no "
                  "public link for an HTML-only email): %s", ", ".join(kept_out))
 
     if args.dry_run:
-        for ch, secs in targets:
+        save = os.environ.get("MEL_DIGEST_SAVE_DIR")  # optional: keep the files to look at
+        for ch, secs, files_for in targets:
             log.info("[dry-run] would post to %s:\n%s\n\n[in its thread]\n%s", ch, header,
-                     "\n\n[next reply]\n".join(replies(secs)))
-        return 0
+                     "\n\n[next reply]\n".join(t for t, _ in replies(secs)))
+            for name, _ in secs:
+                files = files_for(name)
+                if files:
+                    log.info("[dry-run] then attach in %s: %s | %s", ch, files_comment(name, files),
+                             ", ".join(f"{f['name']} ({len(f['data']) // 1024} KB)" for f in files))
+                for f in files:
+                    if save:
+                        Path(save, f["name"]).write_bytes(f["data"])
+        for p in dict.fromkeys(file_problems):
+            log.error("ALERT: file not shared: %s", p)
+        return 1 if file_problems else 0
 
     failed = False
-    for ch, secs in targets:
+    for ch, secs, files_for in targets:
         try:
-            post_roundup(ch, header, secs, workspace)
+            file_problems += post_roundup(ch, header, secs, files_for, workspace)
             log.info("Posted the roundup to %s with %d org(s) in its thread.", ch, len(secs))
         except (mel.SlackAuthError, mel.SlackCallError) as e:
             log.error("ALERT: failed to post the roundup to %s (%s).", ch, e)
             failed = True
-    return 1 if failed else 0
+    for p in dict.fromkeys(file_problems):
+        log.error("ALERT: file not shared: %s", p)
+    if any("missing_scope" in p for p in file_problems):
+        log.error("ALERT: the Mel intake Slack app needs the files:write user scope to attach "
+                  "files (README, 'Slack app').")
+    return 1 if failed or file_problems else 0
 
 
 if __name__ == "__main__":

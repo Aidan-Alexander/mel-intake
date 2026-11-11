@@ -3,7 +3,12 @@ name: Newsletter digest
 on:
   schedule:
     - cron: "0 8 * * 1"      # Mondays ~09:00 London (BST) / 08:00 (GMT)
-  workflow_dispatch: {}        # manual "Run workflow" button
+  workflow_dispatch:           # manual "Run workflow" button
+    inputs:
+      dry_run:
+        description: "Build the roundup and its PDFs but post nothing (check the log)."
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -28,4 +33,4 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
       - name: Post weekly newsletter digest
-        run: python newsletter_digest.py
+        run: python newsletter_digest.py ${{ inputs.dry_run && '--dry-run' || '' }}

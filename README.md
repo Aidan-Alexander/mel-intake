@@ -227,7 +227,10 @@ the email is inside the lookback window (or use `--since-days N`). `mel_intake.p
   other emails go on an "Also:" line). One without is attached in the thread as a PDF of
   the full email, printed with headless Chrome from the HTML Slack keeps, minus AIM's
   unsubscribe and preference links, tracking pixels and AIM addresses. Any report an email
-  came with (PDF, Word, PowerPoint, Excel) is attached too. In #aim-community a file goes
+  came with (PDF, Word, PowerPoint, Excel) is attached too. The files go at the end of the
+  thread, after all the text, one message per org in the same order as the sections, and
+  the org's name in its section is followed by "(see attached PDF below)" (or "report").
+  In #aim-community a file goes
   only if its text could be read and names no undercover charity. Intake also reads
   attached PDF reports (first ~12k chars, `MEL_PDF_TEXT_MAXCHARS`) into the summary and
   `Raw email`, because some charities (FEM) send a short cover note with the real update

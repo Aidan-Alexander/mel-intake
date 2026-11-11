@@ -202,9 +202,12 @@ def other_links(g: dict, heading_link: str) -> list[tuple[str, str]]:
     return out
 
 
-def section(name: str, g: dict, bullets: list, link: str, others: list = ()) -> str:
-    """One org's block for the thread: its name (linked when there's a link) and its bullets."""
+def section(name: str, g: dict, bullets: list, link: str, others: list = (), note: str = "") -> str:
+    """One org's block for the thread: its name (linked when there's a link, followed by `note`
+    when its files are attached at the end of the thread) and its bullets."""
     head = f"*<{link}|{name}>*" if link else f"*{name}*"
+    if note:
+        head += f" {note}"
     if len(g["rows"]) > 1:
         head += f"  _({len(g['rows'])} emails)_"
     if bullets:
@@ -215,7 +218,7 @@ def section(name: str, g: dict, bullets: list, link: str, others: list = ()) -> 
     # No bullets. If it's a content-less HTML-only stub (not a regranter with only excluded
     # grantee news), point to the email instead of dropping it silently.
     raw_all = "\n\n".join((r.get("Raw email") or "") for r in g["rows"])
-    if mel.is_contentless(raw_all) and link:
+    if mel.is_contentless(raw_all) and (link or note):
         subj = max(g["rows"], key=lambda r: r.get("Date", "")).get("Subject", "").strip()
         return head + "\n" + (f"• _{subj}_ — HTML-only email, open to read." if subj
                               else "• _HTML-only email — open to read._")
@@ -319,7 +322,10 @@ def email_pdf(email: dict, row: dict) -> tuple[bytes, str]:
 
 
 def file_name(org: str, subject: str) -> str:
-    base = re.sub(r"\s+", " ", re.sub(r'[\\/:*?"<>|]+', " ", f"{org} - {subject}")).strip()
+    """The subject, prefixed with the org's name unless the subject already contains it."""
+    short = re.sub(r"\s*\(.*\)$", "", org).lower()  # "Lead Exposure ... (LEEP)" -> "lead exposure ..."
+    title = subject if short and short in subject.lower() else f"{org} - {subject}"
+    base = re.sub(r"\s+", " ", re.sub(r'[\\/:*?"<>|]+', " ", title)).strip()
     return base[:90].rstrip(" .-") + ".pdf"
 
 
@@ -355,6 +361,19 @@ def org_files(name: str, g: dict, intake_channel: str, problems: list) -> list[d
     return out
 
 
+def attachment_note(files: list[dict]) -> str:
+    """What goes after an org's name when its files are attached at the end of the thread."""
+    if not files:
+        return ""
+    many = len(files) > 1
+    if any(f["kind"] == "email" for f in files):
+        return "(see attached PDFs below)" if many else "(see attached PDF below)"
+    return "(see attached reports below)" if many else "(see attached report below)"
+
+
+AIRTABLE_LINK = re.compile(r"<https?://(?:www\.)?airtable\.com/[^|>]*\|([^>]*)>")
+
+
 def files_comment(name: str, files: list[dict]) -> str:
     emails = sum(f["kind"] == "email" for f in files)
     reports = len(files) - emails
@@ -381,23 +400,24 @@ def send(channel: str, text: str, thread_ts: str = "", workspace: str | None = N
 
 def post_roundup(channel: str, header: str, sections: list[tuple[str, str]], files_for,
                  workspace: str) -> list[str]:
-    """One short line in the channel; the org sections go in its thread, each reply followed by
-    the files of the orgs in it. Returns problems with files (a failed text post raises)."""
+    """One short line in the channel; the org sections go in its thread, then all the files at
+    the end, one message per org in the same order as the sections (Aidan, Nov 2026).
+    Returns problems with files (a failed text post raises)."""
     problems = []
     parent = send(channel, header, workspace=workspace)
-    for text, names in replies(sections):
+    for text, _ in replies(sections):
         time.sleep(1)  # Slack allows about one message a second per channel
         send(channel, text, parent, workspace=workspace)
-        for name in names:
-            files = files_for(name)
-            if not files:
-                continue
-            time.sleep(1)
-            try:
-                mel.slack_upload(channel, [(f["name"], f["data"]) for f in files], thread_ts=parent,
-                                 comment=files_comment(name, files))
-            except mel.SlackCallError as e:
-                problems.append(f"{name} in {channel}: {e}")
+    for name, _ in sections:
+        files = files_for(name)
+        if not files:
+            continue
+        time.sleep(1)
+        try:
+            mel.slack_upload(channel, [(f["name"], f["data"]) for f in files], thread_ts=parent,
+                             comment=files_comment(name, files))
+        except mel.SlackCallError as e:
+            problems.append(f"{name} in {channel}: {e}")
     return problems
 
 
@@ -443,19 +463,40 @@ def main() -> int:
     bullets = org_bullets(groups, anthropic_key, model)
     bull_by_norm = {_norm(k): v for k, v in bullets.items()}
 
+    # Files (PDFs of emails with no web version, attached reports) are built once per org and
+    # shared by both channels; #aim-community only gets the ones whose text could be read and
+    # names no undercover charity. They go at the end of the thread, and each section says so.
+    intake_channel = os.environ.get("MEL_INTAKE_CHANNEL", "C0B9WG6UY4W")
+    file_problems, cache = [], {}
+
+    def staff_files(name: str) -> list[dict]:
+        if name not in cache:
+            cache[name] = org_files(name, groups[name], intake_channel, file_problems)
+        return cache[name]
+
+    def community_files(name: str) -> list[dict]:
+        return community_safe(staff_files(name), private_names)
+
     staff, community, kept_out = [], [], []
     for name, g in sorted(groups.items(), key=lambda kv: kv[1]["date"], reverse=True):
         bl = bull_by_norm.get(_norm(name)) or []
-        others = other_links(g, g["public_link"])
-        s = section(name, g, bl, g["public_link"] or g["airtable_link"], others)
-        if not s:
+        raw_all = "\n\n".join((r.get("Raw email") or "") for r in g["rows"])
+        if not bl and not mel.is_contentless(raw_all):
             log.info("No updates of its own from %s; left out of the roundup.", name)
+            continue
+        others = other_links(g, g["public_link"])
+        s = section(name, g, bl, g["public_link"] or g["airtable_link"], others,
+                    attachment_note(staff_files(name)))
+        if not s:
             continue
         staff.append((name, s))
         # #aim-community reaches people outside AIM: only charities matched to a MEL record
         # and not undercover, linked only to public pages, and never naming an undercover one.
         public = bool(g["ids"]) and not (g["ids"] & private_ids)
-        c = section(name, g, bl, g["public_link"], others) if public else ""
+        c = ""
+        if public:
+            c = section(name, g, bl, g["public_link"], others, attachment_note(community_files(name)))
+            c = AIRTABLE_LINK.sub(r"\1", c)  # never an Airtable link here: members can't open it
         if c and not any(n in c.lower() for n in private_names):
             community.append((name, c))
         else:
@@ -468,19 +509,6 @@ def main() -> int:
     start = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%-d %b")
     end = datetime.now(timezone.utc).strftime("%-d %b")
     header = f"🤖 *Charity newsletter roundup for {start}–{end}*"
-
-    # Files are built once per org and shared by both channels; #aim-community only gets
-    # the ones whose text could be read and names no undercover charity.
-    intake_channel = os.environ.get("MEL_INTAKE_CHANNEL", "C0B9WG6UY4W")
-    file_problems, cache = [], {}
-
-    def staff_files(name: str) -> list[dict]:
-        if name not in cache:
-            cache[name] = org_files(name, groups[name], intake_channel, file_problems)
-        return cache[name]
-
-    def community_files(name: str) -> list[dict]:
-        return community_safe(staff_files(name), private_names)
 
     targets = [(channel, staff, staff_files)]
     if community_channel and community:

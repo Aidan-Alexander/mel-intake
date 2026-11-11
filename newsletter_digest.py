@@ -157,19 +157,20 @@ def group_by_org(rows: list[dict], charities_by_id: dict) -> dict:
 
 
 def org_bullets(groups: dict, api_key: str, model: str) -> dict:
-    """Ask Claude for {org_name: [bullets]} across all orgs in one call."""
+    """Ask Claude for {org_name: [bullets]} across all orgs in one call.
+
+    Every org gets an equal share of TOTAL_CAP (at most RAW_PER_ORG), so none is left out.
+    Until Nov 2026 orgs past the cap were silently dropped: a five-week test lost 3 of 10.
+    """
     import anthropic
     client = anthropic.Anthropic(api_key=api_key, max_retries=6)
-    blocks, total = [], 0
+    per_org = min(RAW_PER_ORG, TOTAL_CAP // max(1, len(groups)) - 100)
+    blocks = []
     for name, g in groups.items():
-        raw = "\n\n".join((r.get("Raw email") or "") for r in g["rows"])[:RAW_PER_ORG]
-        block = f"ORG: {name}\n{raw}"
-        if total + len(block) > TOTAL_CAP:
-            break
-        blocks.append(block)
-        total += len(block)
+        raw = "\n\n".join((r.get("Raw email") or "") for r in g["rows"])[:per_org]
+        blocks.append(f"ORG: {name}\n{raw}")
     user_msg = "\n\n=====\n\n".join(blocks) + "\n\nReturn the JSON now."
-    resp = client.messages.create(model=model, max_tokens=2000, system=DIGEST_SYSTEM,
+    resp = client.messages.create(model=model, max_tokens=4000, system=DIGEST_SYSTEM,
                                   messages=[{"role": "user", "content": user_msg}])
     text = "".join(b.text for b in resp.content if getattr(b, "type", None) == "text").strip()
     if text.startswith("```"):
@@ -448,6 +449,7 @@ def main() -> int:
         others = other_links(g, g["public_link"])
         s = section(name, g, bl, g["public_link"] or g["airtable_link"], others)
         if not s:
+            log.info("No updates of its own from %s; left out of the roundup.", name)
             continue
         staff.append((name, s))
         # #aim-community reaches people outside AIM: only charities matched to a MEL record

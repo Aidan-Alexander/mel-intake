@@ -437,6 +437,22 @@ def is_contentless(raw: str) -> bool:
     return len(prose) < 600
 
 
+def clean_public_link(url: str) -> str:
+    """Drop the subscriber id (e=...) Mailchimp adds to its web-version links.
+
+    With it, the page is AIM's own subscriber copy of the email; without it, it's the generic
+    web version, which is what a link shared in Slack should open.
+    """
+    if not url:
+        return ""
+    u = urllib.parse.urlparse(url)
+    host = u.netloc.lower()
+    if host == "mailchi.mp" or host == "campaign-archive.com" or host.endswith(".campaign-archive.com"):
+        query = [(k, v) for k, v in urllib.parse.parse_qsl(u.query, keep_blank_values=True) if k != "e"]
+        return urllib.parse.urlunparse(u._replace(query=urllib.parse.urlencode(query)))
+    return url
+
+
 def pdf_to_text(raw: bytes, max_chars: int) -> str:
     """Extract text from a PDF, truncated to max_chars.
 

@@ -2,7 +2,7 @@
 
 A small set of automations that feed **Ambitious Impact (AIM)'s** monitoring, evaluation &
 learning (MEL) work from Slack and forwarded newsletters into Airtable, and push a weekly
-summary back to staff on Slack.
+summary to staff and the AIM community on Slack.
 
 Everything runs on **GitHub Actions** on a schedule (no server, no always-on Mac needed).
 Each job is a small self-contained Python script that talks directly to the **Slack Web
@@ -17,7 +17,7 @@ API**.
 |---|---|---|---|---|
 | **Thread intake** | `mel_intake.py` | Captures charity-performance **Slack threads** people flag | Daily | 1 row per thread → **MEL Notes** table |
 | **Newsletter intake** | `newsletter_intake.py` | Imports charity **newsletters** forwarded into #mel-intake | Daily | 1 row per newsletter → **Newsletter Intake** table |
-| **Weekly digest** | `newsletter_digest.py` | Summarises the week's newsletters, grouped by org | Mondays | Message → **#aim-staff** |
+| **Weekly digest** | `newsletter_digest.py` | Summarises the week's newsletters, grouped by org | Mondays | One-line message + thread → **#aim-staff** and **#aim-community** (no undercover orgs) |
 | **Coverage check** | `charity_newsletter_check.py` | Flags active charities we've had **no** newsletter from | Quarterly | DM → **Morgan Fairless** |
 
 All four share one input channel (**#mel-intake**) and one Airtable base, and use the same
@@ -40,7 +40,7 @@ three secrets.
      Airtable: MEL Notes  <----   base   ---->  Airtable: Newsletter Intake
                                                     |                 |
                         newsletter_digest.py  <-----+                 |
-                        (weekly, by org) --> #aim-staff               |
+                        (weekly, by org) --> #aim-staff, #aim-community|
                         charity_newsletter_check.py  <----------------+
                         (quarterly) --> DM Morgan (gaps vs Charities table)
 ```
@@ -211,7 +211,19 @@ the email is inside the lookback window (or use `--since-days N`). `mel_intake.p
   the digest falls back to listing the org with a link to open the email.
 - **The digest** groups by organisation, links each org to its "view in browser" email, and
   is scoped to each org's **own** news — a recommender/regranter's grantee wins are excluded.
-  Messages are prefixed with 🤖 so staff know they're automated.
+  Messages are prefixed with 🤖 so staff know they're automated. Each channel gets a one-line
+  "Charity newsletter roundup" message with the org sections in its thread (split into
+  replies under Slack's ~4,000-character limit).
+- **#aim-community** is shared beyond AIM (~530 people), so the digest only posts charities
+  matched to a MEL Charities record whose `Undercover?` field is blank. Anything else
+  ("Yes", "Private research report", an org not matched to a charity) stays out, as does any
+  section that names an undercover charity. **Keep `Undercover?` in MEL current** (the
+  website base's checkbox mirrors it by hand), especially for new animal charities. Links
+  there go only to public web versions, never Airtable; an org whose email has no web version
+  is shown unlinked. Set `MEL_COMMUNITY_CHANNEL=""` to stop posting there.
+- **Web-version links:** Mailchimp emails without a "view in browser" link get their web
+  version from the account and campaign ids in the unsubscribe link, and Mailchimp's
+  subscriber id (`e=`) is stripped from links so they open the generic copy, not AIM's own.
 - **Anthropic rate limit:** the org is on a tight 10,000 input-tokens/min tier, so the
   scripts cap input sizes and the SDK backs off/retries. A backlog processes a bit slowly;
   raising the API tier removes the throttle.

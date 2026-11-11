@@ -1,12 +1,17 @@
 #!/usr/bin/env python3
 """
-Weekly newsletter digest -> #aim-staff.
+Weekly newsletter digest -> #aim-staff and #aim-community.
 
 Reads the past week's rows from the Airtable "Newsletter Intake" table, groups them BY
-ORGANISATION, has Claude Sonnet 4.6 write a few concise bullets of noteworthy updates per
-org (hiring, progress, new evidence/evaluations, funding, and anything else notable), and
-posts the digest to #aim-staff — each org headed by a link to its "View this email in your
-browser" page so people can read it properly. Run `python3 newsletter_digest.py --help`.
+ORGANISATION, and has Claude Sonnet 4.6 write a few concise bullets of noteworthy updates per
+org (hiring, progress, new evidence/evaluations, funding, and anything else notable). Each
+channel gets a one-line "Charity newsletter roundup" message with the org sections in its
+thread, each org headed by a link to its "view in browser" page so people can read it.
+
+#aim-staff gets every org, falling back to the org's Airtable row when an email has no web
+version. #aim-community is shared beyond AIM, so it only gets charities matched to a MEL
+Charities record whose "Undercover?" field is blank, links only to public pages, and drops
+any section that names an undercover charity. Run `python3 newsletter_digest.py --help`.
 """
 
 import argparse
@@ -15,6 +20,7 @@ import logging
 import os
 import re
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 
 import requests
@@ -24,6 +30,7 @@ log = logging.getLogger("newsletter_digest")
 
 RAW_PER_ORG = 6000     # chars of raw email per org fed to the model
 TOTAL_CAP = 32000      # total chars across orgs (keeps under the token limit)
+SLACK_REPLY_MAX = 3800  # Slack shows up to ~4,000 characters a message, so long threads split
 
 DIGEST_SYSTEM = (
     "You are compiling a weekly internal digest for Ambitious Impact (AIM) staff from "
@@ -74,6 +81,38 @@ def fetch_recent(token: str, base_id: str, table: str, days: int) -> list[dict]:
     return out
 
 
+def charity_privacy(token: str, base_id: str, table: str) -> tuple[dict, set]:
+    """Return ({MEL Charities record id: name}, {ids of charities that mustn't be named publicly}).
+
+    A charity is private when its "Undercover?" field holds anything but "No" ("Yes",
+    "Private research report", ...). The AIM website base mirrors this field by hand.
+    """
+    url = f"{mel.AIRTABLE_API}/{base_id}/{table}"
+    names, private, offset = {}, set(), None
+    while True:
+        params = {"pageSize": 100, "fields[]": ["Name", "Undercover?"]}
+        if offset:
+            params["offset"] = offset
+        r = requests.get(url, headers=mel.airtable_headers(token), params=params, timeout=30)
+        r.raise_for_status()
+        body = r.json()
+        for rec in body.get("records", []):
+            f = rec.get("fields") or {}
+            if f.get("Name"):
+                names[rec["id"]] = f["Name"]
+            if (f.get("Undercover?") or "").strip().lower() not in ("", "no"):
+                private.add(rec["id"])
+        offset = body.get("offset")
+        if not offset:
+            break
+    return names, private
+
+
+def linked_ids(row: dict) -> list[str]:
+    """MEL Charities record ids in a row's Organization link."""
+    return [o if isinstance(o, str) else (o or {}).get("id") for o in (row.get("Organization") or [])]
+
+
 def org_label(row: dict, charities_by_id: dict) -> str:
     """Org name from the linked Charities record, falling back to the From display name."""
     org = row.get("Organization") or []
@@ -88,17 +127,19 @@ def org_label(row: dict, charities_by_id: dict) -> str:
 
 
 def group_by_org(rows: list[dict], charities_by_id: dict) -> dict:
-    """Group rows by org name, tracking the most recent date and its link per org."""
+    """Group rows by org name, keeping each org's charity ids, latest date and newest links."""
     groups: dict[str, dict] = {}
-    for row in rows:
+    for row in sorted(rows, key=lambda r: r.get("Date", "")):  # oldest first, so newest wins
         name = org_label(row, charities_by_id)
-        g = groups.setdefault(name, {"rows": [], "date": "", "link": ""})
+        g = groups.setdefault(name, {"rows": [], "date": "", "ids": set(),
+                                     "public_link": "", "airtable_link": ""})
         g["rows"].append(row)
-        d = row.get("Date", "")
-        if d >= g["date"]:  # prefer the most recent newsletter's link
-            g["date"] = d
-            # public "view in browser" URL if the email had one, else the Airtable row
-            g["link"] = row.get("Email link") or row.get("_airtable_url") or g["link"]
+        g["ids"].update(i for i in linked_ids(row) if i)
+        g["date"] = row.get("Date") or g["date"]
+        # The email's public "view in browser" page opens for anyone; the Airtable row (which
+        # holds the full copy) opens only for staff.
+        g["public_link"] = mel.clean_public_link(row.get("Email link") or "") or g["public_link"]
+        g["airtable_link"] = row.get("_airtable_url") or g["airtable_link"]
     return groups
 
 
@@ -132,6 +173,52 @@ def _norm(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "").lower()).strip()
 
 
+def section(name: str, g: dict, bullets: list, link: str) -> str:
+    """One org's block for the thread: its name (linked when there's a link) and its bullets."""
+    head = f"*<{link}|{name}>*" if link else f"*{name}*"
+    if len(g["rows"]) > 1:
+        head += f"  _({len(g['rows'])} emails)_"
+    if bullets:
+        return head + "\n" + "\n".join(f"• {b}" for b in bullets)
+    # No bullets. If it's a content-less HTML-only stub (not a regranter with only excluded
+    # grantee news), point to the email instead of dropping it silently.
+    raw_all = "\n\n".join((r.get("Raw email") or "") for r in g["rows"])
+    if mel.is_contentless(raw_all) and link:
+        subj = max(g["rows"], key=lambda r: r.get("Date", "")).get("Subject", "").strip()
+        return head + "\n" + (f"• _{subj}_ — HTML-only email, open to read." if subj
+                              else "• _HTML-only email — open to read._")
+    return ""
+
+
+def replies(sections: list[str], limit: int = SLACK_REPLY_MAX) -> list[str]:
+    """Pack the org sections into as few thread replies as fit under `limit` characters."""
+    out, cur = [], ""
+    for s in sections:
+        if cur and len(cur) + 2 + len(s) > limit:
+            out.append(cur)
+            cur = ""
+        cur = f"{cur}\n\n{s}" if cur else s
+    if cur:
+        out.append(cur)
+    return out
+
+
+def send(channel: str, text: str, thread_ts: str = "", workspace: str | None = None) -> str:
+    """Post one message and return its ts. (mel.slack returns Slack's errors rather than raising.)"""
+    j = mel.slack("send", channel, text, thread_ts, workspace=workspace)
+    if not j.get("ok"):
+        raise mel.SlackCallError(f"chat.postMessage to {channel} failed: {j.get('error')}")
+    return j["ts"]
+
+
+def post_roundup(channel: str, header: str, sections: list[str], workspace: str) -> None:
+    """One short line in the channel; the org sections go in its thread."""
+    parent = send(channel, header, workspace=workspace)
+    for text in replies(sections):
+        time.sleep(1)  # Slack allows about one message a second per channel
+        send(channel, text, parent, workspace=workspace)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Weekly newsletter digest (by org) -> #aim-staff.")
     ap.add_argument("--dry-run", action="store_true", help="Build and print the digest, but don't post.")
@@ -147,6 +234,8 @@ def main() -> int:
     table_id = os.environ.get("AIRTABLE_NEWSLETTERS_TABLE_ID", "tblr8m5vdnya1PmzD")
     charities_table = os.environ.get("AIRTABLE_CHARITIES_TABLE_ID", "tblSsWP0lp1fH9kk6")
     channel = os.environ.get("MEL_DIGEST_CHANNEL", "CMS6V5XEJ")  # #aim-staff
+    # #aim-community: shared with ~530 people beyond AIM. Set to "" to stop posting there.
+    community_channel = os.environ.get("MEL_COMMUNITY_CHANNEL", "C01CB2X08Q5")
     model = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-6")
     days = args.since_days if args.since_days is not None else int(os.environ.get("MEL_DIGEST_LOOKBACK_DAYS", "7"))
 
@@ -166,50 +255,57 @@ def main() -> int:
         log.info("No newsletters this week; nothing to post.")
         return 0
 
-    charities = mel.fetch_charities(airtable_token, base_id, charities_table)
-    charities_by_id = {c["id"]: c["name"] for c in charities}
+    charities_by_id, private_ids = charity_privacy(airtable_token, base_id, charities_table)
+    private_names = [charities_by_id[i].lower() for i in private_ids if i in charities_by_id]
     groups = group_by_org(rows, charities_by_id)
     bullets = org_bullets(groups, anthropic_key, model)
     bull_by_norm = {_norm(k): v for k, v in bullets.items()}
 
-    sections = []
+    staff, community, kept_out = [], [], []
     for name, g in sorted(groups.items(), key=lambda kv: kv[1]["date"], reverse=True):
         bl = bull_by_norm.get(_norm(name)) or []
-        head = f"*<{g['link']}|{name}>*" if g["link"] else f"*{name}*"
-        if len(g["rows"]) > 1:
-            head += f"  _({len(g['rows'])} emails)_"
-        if not bl:
-            # No bullets. If it's a content-less HTML-only stub (not a regranter with only
-            # excluded grantee news), surface it with a link instead of dropping it silently.
-            raw_all = "\n\n".join((r.get("Raw email") or "") for r in g["rows"])
-            if mel.is_contentless(raw_all) and g["link"]:
-                subj = max(g["rows"], key=lambda r: r.get("Date", "")).get("Subject", "").strip()
-                note = f"• _{subj}_ — HTML-only email, open to read." if subj \
-                    else "• _HTML-only email — open to read._"
-                sections.append(head + "\n" + note)
+        s = section(name, g, bl, g["public_link"] or g["airtable_link"])
+        if not s:
             continue
-        sections.append(head + "\n" + "\n".join(f"• {b}" for b in bl))
+        staff.append(s)
+        # #aim-community reaches people outside AIM: only charities matched to a MEL record
+        # and not undercover, linked only to public pages, and never naming an undercover one.
+        public = bool(g["ids"]) and not (g["ids"] & private_ids)
+        c = section(name, g, bl, g["public_link"]) if public else ""
+        if c and not any(n in c.lower() for n in private_names):
+            community.append(c)
+        else:
+            kept_out.append(name)
 
-    if not sections:
+    if not staff:
         log.warning("Nothing notable to post.")
         return 0
 
     start = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%-d %b")
     end = datetime.now(timezone.utc).strftime("%-d %b")
-    header = f"🤖 *Charity newsletter roundup for {start}–{end}*\n\n"
-    message = header + "\n\n".join(sections)
+    header = f"🤖 *Charity newsletter roundup for {start}–{end}*"
+    targets = [(channel, staff)]
+    if community_channel and community:
+        targets.append((community_channel, community))
+    if community_channel and kept_out:
+        log.info("Kept out of #aim-community (undercover, not matched to a charity, or no "
+                 "public link for an HTML-only email): %s", ", ".join(kept_out))
 
     if args.dry_run:
-        log.info("[dry-run] would post to %s:\n\n%s", channel, message)
+        for ch, secs in targets:
+            log.info("[dry-run] would post to %s:\n%s\n\n[in its thread]\n%s", ch, header,
+                     "\n\n[next reply]\n".join(replies(secs)))
         return 0
 
-    try:
-        mel.slack("send", channel, message, workspace=workspace)
-        log.info("Posted weekly digest to %s.", channel)
-    except (mel.SlackAuthError, mel.SlackCallError) as e:
-        log.error("ALERT: failed to post digest (%s).", e)
-        return 1
-    return 0
+    failed = False
+    for ch, secs in targets:
+        try:
+            post_roundup(ch, header, secs, workspace)
+            log.info("Posted the roundup to %s with %d org(s) in its thread.", ch, len(secs))
+        except (mel.SlackAuthError, mel.SlackCallError) as e:
+            log.error("ALERT: failed to post the roundup to %s (%s).", ch, e)
+            failed = True
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":

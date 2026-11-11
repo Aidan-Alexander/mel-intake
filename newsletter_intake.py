@@ -24,6 +24,7 @@ import sys
 import time
 from datetime import datetime, timedelta, timezone
 from html import unescape
+from urllib.parse import parse_qs, urlparse
 
 import requests
 
@@ -72,6 +73,26 @@ def browser_link_from_html(raw_html: str) -> str:
         text = re.sub(r"\s+", " ", text).strip()
         if text and _BROWSER_ANCHOR_TEXT_RE.search(text):
             return unescape(m.group(1).strip())
+    return ""
+
+
+_LIST_MANAGE_HREF_RE = re.compile(r'href\s*=\s*["\'](https?://[^"\']*list-manage\.com/[^"\']*)["\']', re.I)
+
+
+def mailchimp_archive_link(raw_html: str) -> str:
+    """Public web version of a Mailchimp email that has no "view in browser" link.
+
+    Every Mailchimp email's unsubscribe and profile links carry the account id (u) and the
+    campaign id (c), and the campaign's web version lives at a fixed address built from them
+    (e.g. LEEP's newsletters, Nov 2026).
+    """
+    for m in _LIST_MANAGE_HREF_RE.finditer(raw_html or ""):
+        url = urlparse(unescape(m.group(1)))
+        q = parse_qs(url.query)
+        dc = next((part for part in url.netloc.split(".") if re.fullmatch(r"us\d+", part)), None)
+        u, c = (q.get("u") or [""])[0], (q.get("c") or [""])[0]
+        if dc and re.fullmatch(r"[0-9a-f]+", u) and re.fullmatch(r"[0-9a-f]+", c):
+            return f"https://{dc}.campaign-archive.com/?u={u}&id={c}"
     return ""
 
 
@@ -270,7 +291,7 @@ def main() -> int:
                                  len(text), p["subject"], len(body))
                         body = text
                 if not browser_link:
-                    browser_link = browser_link_from_html(raw_html)
+                    browser_link = browser_link_from_html(raw_html) or mailchimp_archive_link(raw_html)
                     if browser_link:
                         log.info("Captured 'view in browser' link from HTML for %r.", p["subject"])
 
@@ -287,7 +308,7 @@ def main() -> int:
             "From": sender,
             "What's covered": s["whats_covered"],
             "Raw email": body[:90000],  # recovered/plain-text copy (Airtable long-text limit ~100k)
-            "Email link": browser_link,
+            "Email link": mel.clean_public_link(browser_link),
             "Source Msg TS": p["ts"],
             "Slack link": f"https://{workspace}.slack.com/archives/{intake_channel}/p{p['ts'].replace('.', '')}",
         }
